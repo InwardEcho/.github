@@ -25,68 +25,68 @@ terraform {
 variable "github_owner" {
   description = "Your GitHub organization name or username."
   type        = string
-  # Example: default = "my-github-org"
+  default     = "InwardEcho"
 }
 
 variable "managed_repository_names" {
   description = "A list of existing repository names to apply standard configurations to."
   type        = list(string)
-  default     = ["my-example-repo", "another-repo-to-manage"] # Replace with your actual list
+  default     = ["SampleApp"]
 }
 
 # Variables for Team Slugs (Replace defaults with your actual slugs or provide at runtime)
 variable "team_slug_team_leads" {
   description = "Slug for the 'Team Leads' team."
   type        = string
-  default     = "placeholder-team-leads"
+  default     = "team-leads"
 }
 
 variable "team_slug_qa_leads" {
   description = "Slug for the 'QA Leads' team."
   type        = string
-  default     = "placeholder-qa-leads"
+  default     = "qa-leads"
 }
 
 variable "team_slug_release_managers" {
   description = "Slug for the 'Release Managers' team."
   type        = string
-  default     = "placeholder-release-managers"
+  default     = "release-managers"
 }
 
 variable "team_slug_tech_leads" {
   description = "Slug for the 'Tech Leads' team."
   type        = string
-  default     = "placeholder-tech-leads"
+  default     = "tech-leads"
 }
 
 variable "team_slug_security_officers" {
   description = "Slug for the 'Security Officers' team."
   type        = string
-  default     = "placeholder-security-officers"
+  default     = "security-officers"
 }
 
 variable "team_slug_product_owners" {
   description = "Slug for the 'Product Owners' team."
   type        = string
-  default     = "placeholder-product-owners"
+  default     = "product-owners"
 }
 
 variable "team_slug_senior_developers" {
   description = "Slug for the 'Senior Developers' team (for branch protection dismissal)."
   type        = string
-  default     = "placeholder-senior-developers"
+  default     = "senior-developers"
 }
 
 variable "team_slug_architects" {
   description = "Slug for the 'Architects' team (for branch protection dismissal)."
   type        = string
-  default     = "placeholder-architects"
+  default     = "architects"
 }
 
 variable "team_slug_devops_team" {
   description = "Slug for the 'DevOps Team' (for branch protection push restrictions)."
   type        = string
-  default     = "placeholder-devops-team"
+  default     = "devops-team"
 }
 
 # Variables for Environment Secrets (Provide these securely, e.g., via TF_VAR_... env vars or a tfvars file)
@@ -267,12 +267,10 @@ resource "github_branch_protection" "main_branch_protection" {
     dismiss_stale_reviews           = true
     require_code_owner_reviews      = true
 
-    dismissal_restrictions {
-      teams = [
-        var.team_slug_senior_developers,
-        var.team_slug_architects
-      ]
-    }
+    dismissal_restrictions = [
+      "${var.github_owner}/${var.team_slug_senior_developers}",
+      "${var.github_owner}/${var.team_slug_architects}",
+    ]
   }
 
   required_status_checks {
@@ -282,20 +280,20 @@ resource "github_branch_protection" "main_branch_protection" {
 
   enforce_admins = true
 
-  restrictions {
-    teams = [
-      var.team_slug_release_managers,
-      var.team_slug_devops_team
+  restrict_pushes {
+    push_allowances = [
+      "${var.github_owner}/${var.team_slug_release_managers}",
+      "${var.github_owner}/${var.team_slug_devops_team}",
     ]
   }
 
   # Other common and recommended protections:
-  require_linear_history = true        # Prevents merge commits, forces squash or rebase.
-  allows_force_pushes    = false       # Protects branch history integrity. CRITICAL: Set to false.
-  allows_deletions       = false       # Protects against accidental deletion of the main branch. CRITICAL: Set to false.
+  required_linear_history = true  # Prevents merge commits, forces squash or rebase.
+  allows_force_pushes    = false # Protects branch history integrity. CRITICAL: Set to false.
+  allows_deletions       = false # Protects against accidental deletion of the main branch. CRITICAL: Set to false.
   # require_signed_commits = true      # Enhances security by verifying commit authenticity.
-                                       # Requires developers to set up GPG/SSH commit signing.
-                                       # Consider enabling if your team is prepared for this.
+  # Requires developers to set up GPG/SSH commit signing.
+  # Consider enabling if your team is prepared for this.
   require_conversation_resolution = true # Ensures all review comments are addressed before merging.
 }
 
