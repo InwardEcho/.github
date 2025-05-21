@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Environment Promotion Workflow",
+    "description": "Manages controlled promotion of builds/artifacts between environments. Validates promotion paths and integrates with GitHub environments for approvals. Typically triggered by workflow_dispatch in the consuming repository.",
+    "iconName": "arrow-both",
+    "categories": ["Deployment", "CD", "Promotion", "Approval"],
+    "filePatterns": []
+}

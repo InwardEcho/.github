@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Release Notes Generation",
+    "description": "Automates the generation of release notes based on conventional commits or PR labels. Creates a draft release or updates an existing one.",
+    "iconName": "tag",
+    "categories": ["Utilities", "Release Management"],
+    "filePatterns": [".github/release.yml", "release-drafter.yml"]
+}

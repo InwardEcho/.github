@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Azure App Service Deployment",
+    "description": "Deploys an application to Azure App Service. Handles environment-specific configurations, artifact deployment, and performs basic post-deployment health checks.",
+    "iconName": "azure",
+    "categories": ["Deployment", "CD", "Azure", "AppService"],
+    "filePatterns": []
+}

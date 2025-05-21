@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Terraform IaC Workflow",
+    "description": "Provides standardized steps for Terraform: init, plan, and apply. Manages workspaces, backend configuration, and plan outputs.",
+    "iconName": "cloud-upload",
+    "categories": ["Terraform", "IaC", "Infrastructure", "CD"],
+    "filePatterns": ["*.tf", "*.tfvars"]
+}

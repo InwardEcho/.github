@@ -1,0 +1,188 @@
+name: 'Organizational Observability & Notification Hooks'
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        description: 'Status of the job or workflow (e.g., success, failure, cancelled).'
+        required: true
+        type: string
+      workflow-name:
+        description: 'Name of the workflow.'
+        required: false
+        type: string
+        default: '${{ github.workflow }}'
+      run-url:
+        description: 'URL to the GitHub Actions run.'
+        required: false
+        type: string
+        default: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+      actor:
+        description: 'User who triggered the workflow.'
+        required: false
+        type: string
+        default: '${{ github.actor }}'
+      repository-name:
+        description: 'Name of the repository.'
+        required: false
+        type: string
+        default: '${{ github.repository }}'
+      commit-sha:
+        description: 'Commit SHA that triggered the workflow.'
+        required: false
+        type: string
+        default: '${{ github.sha }}'
+      branch-name:
+        description: 'Branch or ref name.'
+        required: false
+        type: string
+        default: '${{ github.ref_name }}'
+      custom-message:
+        description: 'Optional custom message to include in the notification.'
+        required: false
+        type: string
+        default: ''
+      # Notification channel toggles
+      send-slack-notification:
+        description: 'Set to true to send a Slack notification.'
+        required: false
+        type: boolean
+        default: false
+      send-msteams-notification:
+        description: 'Set to true to send a Microsoft Teams notification.'
+        required: false
+        type: boolean
+        default: false
+      # Specific channel info (could be inputs if they vary, or use org-level secrets)
+      slack-channel: # Optional, action might default or use webhook's default
+        description: 'Slack channel to send the notification to (e.g., #cicd-alerts).'
+        required: false
+        type: string
+        default: '' # Action might have its own default or use webhook's default
+
+    secrets:
+      SLACK_WEBHOOK_URL: # Secret for Slack webhook
+        description: 'Slack Webhook URL for notifications.'
+        required: false # Only required if send-slack-notification is true
+      MSTEAMS_WEBHOOK_URL: # Secret for MS Teams webhook
+        description: 'Microsoft Teams Webhook URL for notifications.'
+        required: false # Only required if send-msteams-notification is true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare Notification Message
+        id: prep-message
+        run: |
+          status_icon="ℹ️"
+          if [[ "${{ inputs.status }}" == "success" ]]; then
+            status_icon="✅"
+          elif [[ "${{ inputs.status }}" == "failure" ]]; then
+            status_icon="❌"
+          elif [[ "${{ inputs.status }}" == "cancelled" ]]; then
+            status_icon="⚠️"
+          fi
+          
+          commit_short_sha=$(echo "${{ inputs.commit-sha }}" | cut -c1-7)
+          commit_url="${{ github.server_url }}/${{ inputs.repository-name }}/commit/${{ inputs.commit-sha }}"
+
+          title_text="$status_icon Workflow *${{ inputs.workflow-name }}* on *${{ inputs.repository-name }}* branch *${{ inputs.branch-name }}* finished with status: *${{ inputs.status }}*."
+          
+          details="*Repository:* ${{ inputs.repository-name }}\n"
+          details+="*Branch:* `${{ inputs.branch-name }}`\n"
+          details+="*Commit:* <$commit_url | \`${commit_short_sha}\`>\n"
+          details+="*Triggered by:* ${{ inputs.actor }}\n"
+          details+="*Run URL:* <${{ inputs.run-url }} | View Run>\n"
+          
+          if [[ -n "${{ inputs.custom-message }}" ]]; then
+            details+="\n*Details:*\n${{ inputs.custom-message }}\n"
+          fi
+
+          # Slack specific formatting (mrkdwn)
+          slack_payload=$(cat <<EOF
+          {
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "$status_icon ${{ inputs.workflow-name }} - ${{ inputs.status }}"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  { "type": "mrkdwn", "text": "*Repository:*\n<${{ github.server_url }}/${{ inputs.repository-name }}|${{ inputs.repository-name }}>" },
+                  { "type": "mrkdwn", "text": "*Branch:*\n`${{ inputs.branch-name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n*${{ inputs.status }}*" },
+                  { "type": "mrkdwn", "text": "*Triggered by:*\n${{ inputs.actor }}" },
+                  { "type": "mrkdwn", "text": "*Commit:*\n<${commit_url}|\`${commit_short_sha}\`>" }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "${{ inputs.custom-message != '' && format('*Details:*\n%s\n\n', inputs.custom-message) || '' }}<${{ inputs.run-url }}|View Workflow Run>"
+                }
+              }
+            ]
+          }
+EOF
+          )
+          echo "slack_payload_json=$(echo $slack_payload | jq -c .)" >> $GITHUB_OUTPUT
+
+
+          # MS Teams specific formatting (Adaptive Card or simple message)
+          # Simple message for now, Adaptive Card is more complex to build here
+          teams_title="$status_icon Workflow [${{ inputs.workflow-name }}] on [${{ inputs.repository-name }}] branch [${{ inputs.branch-name }}] finished with status: [${{ inputs.status }}]."
+          teams_text="**Repository:** ${{ inputs.repository-name }}\n\n"
+          teams_text+="**Branch:** ${{ inputs.branch-name }}\n\n"
+          teams_text+="**Commit:** [${commit_short_sha}](${commit_url})\n\n"
+          teams_text+="**Triggered by:** ${{ inputs.actor }}\n\n"
+          if [[ -n "${{ inputs.custom-message }}" ]]; then
+            teams_text+="**Details:**\n${{ inputs.custom-message }}\n\n"
+          fi
+          teams_text+="[View Workflow Run](${{ inputs.run-url }})"
+          
+          teams_color="default" # Default color
+          if [[ "${{ inputs.status }}" == "success" ]]; then
+            teams_color="good"
+          elif [[ "${{ inputs.status }}" == "failure" ]]; then
+            teams_color="attention"
+          elif [[ "${{ inputs.status }}" == "cancelled" ]]; then
+            teams_color="warning"
+          fi
+          echo "teams_color=$teams_color" >> $GITHUB_OUTPUT
+
+          echo "teams_title<<EOF" >> $GITHUB_OUTPUT
+          echo "$teams_title" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "teams_text<<EOF" >> $GITHUB_OUTPUT
+          echo "$teams_text" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Send Slack Notification
+        if: inputs.send-slack-notification == true && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.25.0 # Pinned version
+        with:
+          # channel-id: ${{ inputs.slack-channel }} # Use if channel needs to be dynamic and not webhook default
+          payload: ${{ steps.prep-message.outputs.slack_payload_json }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK # Ensure this is set if action requires
+
+      - name: Send Microsoft Teams Notification
+        if: inputs.send-msteams-notification == true && secrets.MSTEAMS_WEBHOOK_URL != ''
+        uses: alisdair/action-notify-microsoft-teams@v1.1.0 # Pinned version
+        with:
+          webhook_url: ${{ secrets.MSTEAMS_WEBHOOK_URL }}
+          title: ${{ steps.prep-message.outputs.teams_title }}
+          message: ${{ steps.prep-message.outputs.teams_text }}
+          color: ${{ steps.prep-message.outputs.teams_color }}
+
+      # Future: Add steps for pushing metrics or logs
+      # - name: Push Custom Metrics
+      #   if: inputs.push-metrics == true ...
+      #   run: echo "Pushing metrics..."

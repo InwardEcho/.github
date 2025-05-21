@@ -1,0 +1,168 @@
+name: 'Organizational Environment Promotion Gate'
+
+on:
+  workflow_call:
+    inputs:
+      source-environment:
+        description: 'Name of the source environment (e.g., dev, test, staging).'
+        required: true
+        type: string
+      target-environment:
+        description: 'Name of the target environment for promotion (e.g., test, staging, production).'
+        required: true
+        type: string
+      application-version:
+        description: 'Version of the application/artifact being promoted.'
+        required: true
+        type: string
+      # Path to the artifact that needs to be deployed.
+      # This workflow assumes the artifact is already built and available.
+      # The calling workflow is responsible for downloading it if it comes from a previous run.
+      artifact-path:
+        description: 'Path to the deployment artifact on the runner.'
+        required: true
+        type: string
+      # Inputs for the org-deploy-environment.yml workflow, passed as a JSON string
+      deployment-parameters:
+        description: |
+          JSON string of parameters to pass to the org-deploy-environment.yml workflow.
+          Example: '{ "deployment-type": "azure-app-service", "azure-app-name": "my-app-test", "health-check-url": "http://myapp-test.com/health" }'
+        required: true
+        type: string
+      # Path to the callable deployment workflow. Defaults to the org-deploy-environment.yml created earlier.
+      # This allows flexibility if a different deployment orchestrator is needed.
+      deployment-workflow-ref:
+        description: 'Reference to the callable deployment workflow (e.g., org/repo/.github/workflows/org-deploy-environment.yml@main).'
+        required: true
+        type: string
+        # default: '' # No default, caller must provide the reference.
+                    # For org templates, this should be the path to the org-deploy-environment.yml
+                    # e.g. ${{ github.repository_owner }}/.github/.github/workflows/org-deploy-environment.yml@main
+                    # This needs careful handling of how org templates are referenced.
+                    # For now, let's assume the caller provides the correct full reusable workflow path.
+
+    secrets: # These secrets are passed down to the deployment workflow
+      AZURE_CREDENTIALS:
+        required: false
+      KUBE_CONFIG_DATA:
+        required: false
+      # Add any other secrets that org-deploy-environment.yml might need
+
+    outputs:
+      promotion-status:
+        description: 'Status of the promotion attempt (validation + deployment call).'
+        value: ${{ jobs.promote.outputs.promotion_outcome }}
+      deployment-job-url:
+        description: 'URL of the triggered deployment job.'
+        value: ${{ jobs.promote.outputs.deployment_job_url }}
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    outputs:
+      promotion_outcome: ${{ steps.set-status.outputs.outcome }}
+      deployment_job_url: ${{ steps.call-deploy.outputs.target_job_url }} # Assuming the deploy call can output this
+
+    steps:
+      - name: Validate Promotion Path
+        id: validate-path
+        run: |
+          source_env="${{ inputs.source-environment }}"
+          target_env="${{ inputs.target-environment }}"
+          echo "Attempting promotion from '$source_env' to '$target_env' for version '${{ inputs.application-version }}'."
+          
+          # Define valid promotion paths (example)
+          # This logic can be made more complex, e.g., read from a config file
+          valid_promotion="false"
+          if [[ "$source_env" == "dev" && "$target_env" == "test" ]]; then
+            valid_promotion="true"
+          elif [[ "$source_env" == "test" && "$target_env" == "staging" ]]; then
+            valid_promotion="true"
+          elif [[ "$source_env" == "staging" && "$target_env" == "production" ]]; then
+            valid_promotion="true"
+          # Add other valid paths, e.g., hotfix paths
+          fi
+          
+          if [[ "$valid_promotion" == "true" ]]; then
+            echo "Promotion path '$source_env' -> '$target_env' is valid."
+            echo "validation_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Invalid promotion path: Cannot promote from '$source_env' to '$target_env'."
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            exit 1 # Fail the job if validation fails
+          fi
+
+      # This workflow itself doesn't handle the UI approval.
+      # The calling workflow (triggered by workflow_dispatch) would be associated with a
+      # GitHub Environment that has protection rules (including manual approval).
+      # This job runs *after* the manual approval is given in the GitHub UI.
+      - name: Log Approval Context (Simulated)
+        if: steps.validate-path.outputs.validation_passed == 'true'
+        run: |
+          echo "Promotion to ${{ inputs.target-environment }} for version ${{ inputs.application-version }} has been (implicitly) approved."
+          echo "Proceeding to call deployment workflow."
+          echo "Deployment parameters: ${{ inputs.deployment-parameters }}"
+
+      - name: Call Deployment Workflow
+        if: steps.validate-path.outputs.validation_passed == 'true'
+        id: call-deploy
+        # The 'uses' path here is critical. It should point to the reusable org-deploy-environment.yml.
+        # If this template is in .github/workflow-templates, and org-deploy-environment.yml is a sibling,
+        # it's not directly callable like this.
+        # The `deployment-workflow-ref` input MUST be used by the caller to specify the correct path.
+        # Example: uses: my-org/.github/.github/workflows/org-deploy-environment.yml@main
+        uses: ${{ inputs.deployment-workflow-ref }} # Caller MUST provide this path
+        with:
+          environment-name: ${{ inputs.target-environment }}
+          artifact-path: ${{ inputs.artifact-path }}
+          version: ${{ inputs.application-version }}
+          # Dynamically pass through deployment parameters
+          # GitHub Actions doesn't directly support spreading a JSON object into 'with'.
+          # The org-deploy-environment.yml would need to parse deployment-parameters if we pass it as a single JSON string.
+          # For now, this template assumes org-deploy-environment.yml is updated or designed
+          # to accept all its parameters from a single JSON input, or this step needs to be more dynamic.
+          #
+          # A simpler, more direct approach if org-deploy-environment.yml has fixed inputs:
+          # deployment-type: ${{ fromJson(inputs.deployment-parameters).deployment-type }}
+          # azure-app-name: ${{ fromJson(inputs.deployment-parameters).azure-app-name }}
+          # ... and so on for all parameters of org-deploy-environment.yml
+          # This requires knowing all params of org-deploy-environment.yml.
+          #
+          # The current org-deploy-environment.yml does not take a single JSON string.
+          # This step will need to be adjusted once that's decided.
+          # For now, I'll assume the `deployment-parameters` input is a JSON string
+          # and the `org-deploy-environment.yml` is adapted to parse it, OR
+          # the calling workflow constructs the `with` block more dynamically if possible,
+          # or this template lists out common parameters.
+          #
+          # Let's assume for now the most common parameters are explicitly passed through,
+          # and others can be added. This is a common pattern.
+          deployment-type: ${{ fromJson(inputs.deployment-parameters).deployment-type }}
+          azure-app-name: ${{ fromJson(inputs.deployment-parameters).azure-app-name || '' }}
+          azure-slot-name: ${{ fromJson(inputs.deployment-parameters).azure-slot-name || 'production' }}
+          kubernetes-manifest-path: ${{ fromJson(inputs.deployment-parameters).kubernetes-manifest-path || '' }}
+          kubernetes-namespace: ${{ fromJson(inputs.deployment-parameters).kubernetes-namespace || 'default' }}
+          deployment-script-path: ${{ fromJson(inputs.deployment-parameters).deployment-script-path || '' }}
+          health-check-url: ${{ fromJson(inputs.deployment-parameters).health-check-url || '' }}
+          # etc. for other inputs of org-deploy-environment.yml
+
+        secrets: # Pass through secrets
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS || '' }} # Pass if provided
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA || '' }}  # Pass if provided
+
+      - name: Set Promotion Outcome
+        id: set-status
+        if: always() # Run even if previous steps fail (unless validate-path exits)
+        run: |
+          if [[ "${{ steps.validate-path.outputs.validation_passed }}" == "true" && \
+                "${{ steps.call-deploy.outputs.deployment-status }}" == "success" ]]; then # Assuming call-deploy has an output 'deployment-status'
+            echo "Promotion to ${{ inputs.target-environment }} successful."
+            echo "outcome=success" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.validate-path.outputs.validation_passed }}" != "true" ]]; then
+            echo "Promotion validation failed."
+            echo "outcome=failure_validation" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Promotion to ${{ inputs.target-environment }} failed during deployment step."
+            echo "outcome=failure_deployment" >> $GITHUB_OUTPUT
+            # exit 1 # Optionally fail the job here too
+          fi

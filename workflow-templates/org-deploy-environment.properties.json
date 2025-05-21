@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Application Deployment Workflow",
+    "description": "Generic deployment workflow for applications to different environments (dev, test, staging, prod). Handles environment-specific configurations/secrets, calls deployment scripts/tools, and performs basic post-deployment health checks.",
+    "iconName": "rocket",
+    "categories": ["Deployment", "CD", "Azure", "Kubernetes"],
+    "filePatterns": []
+}

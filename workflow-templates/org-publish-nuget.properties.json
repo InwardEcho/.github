@@ -1,0 +1,7 @@
+{
+    "name": "Organizational NuGet Package Publisher",
+    "description": "Publishes NuGet packages to a specified feed (e.g., GitHub Packages, Azure Artifacts). Takes package version as input and handles feed authentication via secrets.",
+    "iconName": "package",
+    "categories": ["NuGet", "Publish", "Package", "CI", "CD"],
+    "filePatterns": ["*.nupkg"]
+}

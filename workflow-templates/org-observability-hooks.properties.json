@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Observability & Notification Hooks",
+    "description": "Standardizes pipeline status notifications (e.g., Slack, MS Teams). Captures common workflow context for messages.",
+    "iconName": "bell",
+    "categories": ["Notifications", "Observability", "CI", "CD", "Monitoring"],
+    "filePatterns": []
+}

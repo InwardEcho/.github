@@ -1,0 +1,77 @@
+name: 'Organizational Version Calculator (GitVersion)'
+
+on:
+  workflow_call:
+    inputs:
+      gitversion-version:
+        description: 'Specify the version of GitVersion to use.'
+        required: false
+        type: string
+        default: '5.x' # Use a floating version like 5.x or a specific one like 5.12.0
+      use-config-file:
+        description: 'Whether to use a GitVersion.yml configuration file from the calling repository.'
+        required: false
+        type: boolean
+        default: false
+      config-file-path:
+        description: 'Path to the GitVersion.yml file if use-config-file is true.'
+        required: false
+        type: string
+        default: 'GitVersion.yml' # Default path if a config file is used
+    outputs:
+      version:
+        description: 'The calculated SemVer 2.0 version (e.g., 1.0.0, 1.0.0-beta.1).'
+        value: ${{ jobs.calculate-version.outputs.version }}
+      semver: # GitVersion output name is 'semver'
+        description: 'The calculated SemVer 2.0 version (GitVersion output name).'
+        value: ${{ jobs.calculate-version.outputs.semver }}
+      full-semver:
+        description: 'The full SemVer 2.0 version, including metadata (e.g., 1.0.0-beta.1+5).'
+        value: ${{ jobs.calculate-version.outputs.full-semver }}
+      major-minor-patch:
+        description: 'The Major.Minor.Patch part of the version.'
+        value: ${{ jobs.calculate-version.outputs.major-minor-patch }}
+      informational-version:
+        description: 'The informational version, often including commit hash.'
+        value: ${{ jobs.calculate-version.outputs.informational-version }}
+      commit-date:
+        description: 'The date of the commit used for versioning.'
+        value: ${{ jobs.calculate-version.outputs.commit-date }}
+
+jobs:
+  calculate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gitversion.outputs.semVer }} # Map to a more generic 'version'
+      semver: ${{ steps.gitversion.outputs.semVer }}
+      full-semver: ${{ steps.gitversion.outputs.fullSemVer }}
+      major-minor-patch: ${{ steps.gitversion.outputs.majorMinorPatch }}
+      informational-version: ${{ steps.gitversion.outputs.informationalVersion }}
+      commit-date: ${{ steps.gitversion.outputs.commitDate }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required for GitVersion to access all history and tags
+
+      - name: Setup GitVersion
+        uses: GitTools/actions/gitversion/setup@v1.1.1 # Pinned to a specific version of the setup action
+        with:
+          versionSpec: ${{ inputs.gitversion-version }}
+
+      - name: Determine Version
+        id: gitversion
+        uses: GitTools/actions/gitversion/execute@v1.1.1 # Pinned to a specific version of the execute action
+        with:
+          useConfigFile: ${{ inputs.use-config-file }}
+          configFilePath: ${{ inputs.config-file-path }}
+          # Additional arguments can be passed if needed, e.g., /overrideconfig tag-prefix=v
+
+      - name: Output Version Information
+        run: |
+          echo "Calculated Version (SemVer): ${{ steps.gitversion.outputs.semVer }}"
+          echo "Full SemVer: ${{ steps.gitversion.outputs.fullSemVer }}"
+          echo "Major.Minor.Patch: ${{ steps.gitversion.outputs.majorMinorPatch }}"
+          echo "Informational Version: ${{ steps.gitversion.outputs.informationalVersion }}"
+          echo "Commit Date: ${{ steps.gitversion.outputs.commitDate }}"

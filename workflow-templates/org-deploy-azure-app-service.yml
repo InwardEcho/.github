@@ -1,0 +1,170 @@
+name: 'Organizational Azure App Service Deployment'
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        description: 'Target environment name (e.g., dev, test, staging, production).'
+        required: true
+        type: string
+      artifact-path:
+        description: 'Path to the deployment package or artifact (e.g., a zip file or folder).'
+        required: true
+        type: string
+      version:
+        description: 'Application version being deployed (for logging/tagging).'
+        required: false
+        type: string
+        default: 'N/A'
+      azure-app-name:
+        description: 'Name of the Azure App Service.'
+        required: true
+        type: string
+      azure-slot-name:
+        description: 'Azure App Service deployment slot name (e.g., staging, or "production" for the main slot).'
+        required: false
+        type: string
+        default: 'production'
+      # Health Check Inputs
+      health-check-url:
+        description: 'URL for a basic post-deployment health check.'
+        required: false
+        type: string
+      health-check-retries:
+        description: 'Number of retries for the health check.'
+        required: false
+        type: number
+        default: 3
+      health-check-delay:
+        description: 'Delay in seconds between health check retries.'
+        required: false
+        type: number
+        default: 10
+
+    secrets:
+      AZURE_CREDENTIALS:
+        description: 'Azure Service Principal credentials (JSON object).'
+        required: true # Required for this specific deployment type
+
+    outputs:
+      deployment-status:
+        description: 'Status of the deployment operation (e.g., success, failure_deploy_azure, failure_health_check).'
+        value: ${{ jobs.deploy-azure-app-service.outputs.deployment-outcome }}
+      health-check-status:
+        description: 'Status of the post-deployment health check (healthy/unhealthy/skipped).'
+        value: ${{ jobs.deploy-azure-app-service.outputs.health-check-outcome }}
+      app-service-url: # Example of a more specific output
+        description: 'URL of the deployed Azure App Service (approximated).'
+        value: ${{ jobs.deploy-azure-app-service.outputs.app-url }}
+
+
+jobs:
+  deploy-azure-app-service:
+    runs-on: ubuntu-latest
+    outputs:
+      deployment-outcome: ${{ steps.set-deployment-status.outputs.status }}
+      health-check-outcome: ${{ steps.health-check.outputs.status || 'skipped' }}
+      app-url: ${{ steps.set-app-url.outputs.url }}
+
+    environment: ${{ inputs.environment-name }}
+
+    steps:
+      - name: Verify Artifact Path
+        run: |
+          echo "Deploying version ${{ inputs.version }} to Azure App Service ${{ inputs.azure-app-name }} (slot: ${{ inputs.azure-slot-name }}) in environment ${{ inputs.environment-name }}"
+          echo "Artifact path: ${{ inputs.artifact-path }}"
+          if [ ! -e "${{ inputs.artifact-path }}" ]; then
+            echo "Error: Artifact not found at path: ${{ inputs.artifact-path }}"
+            exit 1
+          fi
+
+      - name: Azure Login
+        id: azure-login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure App Service
+        id: azure-deploy-step
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ inputs.azure-app-name }}
+          slot-name: ${{ inputs.azure-slot-name }}
+          package: ${{ inputs.artifact-path }}
+
+      - name: Set Deployed App URL (Approximation)
+        id: set-app-url
+        # This is an approximation; the exact URL might depend on custom domains, etc.
+        # For slots other than 'production', the URL format is usually appname-slotname.azurewebsites.net
+        # For the 'production' slot, it's appname.azurewebsites.net
+        run: |
+          app_url_base="${{ inputs.azure-app-name }}.azurewebsites.net"
+          if [[ "${{ inputs.azure-slot-name }}" != "production" && -n "${{ inputs.azure-slot-name }}" ]]; then
+            app_url_base="${{ inputs.azure-app-name }}-${{ inputs.azure-slot-name }}.azurewebsites.net"
+          fi
+          echo "url=https://${app_url_base}" >> $GITHUB_OUTPUT
+          echo "Approximated App Service URL: https://${app_url_base}"
+
+
+      - name: Perform Health Check
+        id: health-check
+        if: inputs.health-check-url != '' && steps.azure-deploy-step.outcome == 'success'
+        run: |
+          # If health-check-url is not absolute, prepend with app service URL
+          health_url="${{ inputs.health-check-url }}"
+          if [[ ! "${{ inputs.health-check-url }}" =~ ^https?:// ]]; then
+            base_app_url="${{ steps.set-app-url.outputs.url }}"
+            # Ensure no double slashes if health_check_url starts with /
+            if [[ "${{ inputs.health-check-url }}" =~ ^/ ]]; then
+              health_url="${base_app_url}}${{ inputs.health-check-url }}"
+            else
+              health_url="${base_app_url}}/${{ inputs.health-check-url }}"
+            fi
+          fi
+          echo "Performing health check on: $health_url"
+          status="unhealthy"
+          for i in $(seq 1 ${{ inputs.health-check-retries }}); do
+            echo "Attempt $i of ${{ inputs.health-check-retries }}..."
+            if curl -sfL -o /dev/null "$health_url"; then
+              echo "Health check successful."
+              status="healthy"
+              break
+            else
+              echo "Health check failed on attempt $i for $health_url."
+              if [ $i -lt ${{ inputs.health-check-retries }} ]; then
+                echo "Waiting ${{ inputs.health-check-delay }}s before next retry..."
+                sleep ${{ inputs.health-check-delay }}
+              fi
+            fi
+          done
+          echo "Final health check status: $status"
+          echo "status=$status" >> $GITHUB_OUTPUT
+
+      - name: Set Deployment Status
+        id: set-deployment-status
+        if: always() # Ensure this step always runs to set a final status
+        run: |
+          deploy_step_outcome="${{ steps.azure-deploy-step.outcome }}"
+          health_check_step_outcome="${{ steps.health-check.outputs.status || 'skipped' }}" # Default to skipped if health check didn't run or set output
+          final_status="unknown"
+
+          if [[ "$deploy_step_outcome" == "success" ]]; then
+            if [[ "$health_check_step_outcome" == "healthy" ]]; then
+              final_status="success"
+            elif [[ "$health_check_step_outcome" == "unhealthy" ]]; then
+              final_status="failure_health_check"
+            elif [[ "$health_check_step_outcome" == "skipped" ]]; then
+              final_status="success_no_health_check"
+            else # Should not happen if health_check.outputs.status is always set
+              final_status="success_health_check_unknown"
+            fi
+          else # Deployment step itself failed or was skipped
+            final_status="failure_deploy_azure"
+          fi
+          
+          echo "status=$final_status" >> $GITHUB_OUTPUT
+          echo "Final Deployment Outcome: $final_status"
+          # If deployment failed, ensure the job fails
+          if [[ "$final_status" == "failure_deploy_azure" || "$final_status" == "failure_health_check" ]]; then
+             # exit 1 # Optionally hard fail the job
+          fi

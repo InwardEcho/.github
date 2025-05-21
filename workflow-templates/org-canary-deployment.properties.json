@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Canary Deployment Orchestrator",
+    "description": "Implements a canary release strategy: deploys to a subset, monitors, then promotes or rolls back. Leverages a separate deployment workflow for actual deployment tasks.",
+    "iconName": "beaker",
+    "categories": ["Deployment", "CD", "Canary", "Progressive Delivery"],
+    "filePatterns": []
+}

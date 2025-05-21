@@ -1,0 +1,7 @@
+{
+    "name": "Organizational .NET Build, Test, and Package",
+    "description": "Compiles, tests (.NET unit and integration), and packages C# applications. Handles multiple .NET versions, solution/project paths, build configurations, multi-targeted frameworks, NuGet package caching, test result reporting, and artifact generation (e.g., deployment packages, test reports).",
+    "iconName": "dotnet",
+    "categories": ["C#", ".NET", "Build", "Test", "Package", "CI"],
+    "filePatterns": ["*.sln", "*.csproj"]
+}

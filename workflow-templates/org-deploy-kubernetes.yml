@@ -1,0 +1,189 @@
+name: 'Organizational Kubernetes Deployment'
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        description: 'Target environment name (e.g., dev, test, staging, production).'
+        required: true
+        type: string
+      # For K8s, artifact-path usually refers to manifests or kustomize dir.
+      # The actual application image should be pre-built and pushed to a registry.
+      # The image tag/version is often updated in the manifests.
+      manifest-path:
+        description: 'Path to Kubernetes manifest files or a kustomization directory.'
+        required: true
+        type: string
+      image-tag: # Input to potentially update image tags in manifests if needed
+        description: 'Image tag to use for the deployment (can be used to patch manifests).'
+        required: false
+        type: string
+      application-name: # For context and potentially for rollout status checks
+        description: 'Name of the application or deployment being managed in Kubernetes.'
+        required: true
+        type: string
+      kubernetes-namespace:
+        description: 'Kubernetes namespace to deploy to.'
+        required: false
+        type: string
+        default: 'default'
+      # Health Check Inputs
+      health-check-url: # This would be an external URL/ingress for the service
+        description: 'URL for a basic post-deployment health check (e.g., service endpoint).'
+        required: false
+        type: string
+      health-check-retries:
+        description: 'Number of retries for the health check.'
+        required: false
+        type: number
+        default: 3
+      health-check-delay:
+        description: 'Delay in seconds between health check retries.'
+        required: false
+        type: number
+        default: 10
+      # Optional: Add input for kubectl-version if specific version is needed.
+      # Optional: Add input for rollout-status-timeout.
+
+    secrets:
+      KUBE_CONFIG_DATA:
+        description: 'Base64 encoded Kubeconfig data for Kubernetes.'
+        required: true # Required for this specific deployment type
+
+    outputs:
+      deployment-status:
+        description: 'Status of the deployment operation (e.g., success, failure_deploy_k8s, failure_health_check).'
+        value: ${{ jobs.deploy-kubernetes.outputs.deployment-outcome }}
+      health-check-status:
+        description: 'Status of the post-deployment health check (healthy/unhealthy/skipped).'
+        value: ${{ jobs.deploy-kubernetes.outputs.health-check-outcome }}
+
+jobs:
+  deploy-kubernetes:
+    runs-on: ubuntu-latest
+    outputs:
+      deployment-outcome: ${{ steps.set-deployment-status.outputs.status }}
+      health-check-outcome: ${{ steps.health-check.outputs.status || 'skipped' }}
+
+    environment: ${{ inputs.environment-name }}
+
+    steps:
+      - name: Checkout repository (to access manifest files)
+        uses: actions/checkout@v4
+        # Potentially checkout a specific path if manifests are in a different repo or sub-module
+
+      - name: Setup Kubeconfig
+        id: setup-kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+          echo "Successfully configured KUBECONFIG."
+          kubectl version --client
+
+      # Optional: Step to update image tag in manifests using kustomize, yq, sed, etc.
+      # This depends heavily on how manifests are structured.
+      # Example using kustomize set image (if using kustomization.yaml):
+      # - name: Update Image Tag in Kustomize
+      #   if: inputs.image-tag != '' && ( endsWith(inputs.manifest-path, 'kustomization.yaml') || endsWith(inputs.manifest-path, 'kustomization.yml') || -d inputs.manifest-path )
+      #   run: |
+      #     cd $(dirname ${{ inputs.manifest-path }}) # or the kustomize dir
+      #     kustomize edit set image <YOUR_IMAGE_NAME_PATTERN>=${{ inputs.image-tag }}
+      #   # Ensure kustomize is installed or use an action
+
+      - name: Deploy to Kubernetes using kubectl
+        id: k8s-deploy-step
+        run: |
+          echo "Deploying application ${{ inputs.application-name }} (image tag: ${{ inputs.image-tag || 'not specified' }}) to Kubernetes namespace: ${{ inputs.kubernetes-namespace }}"
+          echo "Using manifest path: ${{ inputs.manifest-path }}"
+          
+          # Determine if manifest-path is a directory (for kustomize) or file(s)
+          apply_command="kubectl apply -f ${{ inputs.manifest-path }}"
+          if [[ -d "${{ inputs.manifest-path }}" || "${{ inputs.manifest-path }}" == *kustomization.y*ml ]]; then
+            # Assuming kustomize if it's a directory or kustomization file
+            # Ensure kustomize is installed or use `kubectl apply -k` if supported and preferred
+            if command -v kustomize &> /dev/null; then
+              echo "Using kustomize build for path: ${{ inputs.manifest-path }}"
+              apply_command="kustomize build ${{ inputs.manifest-path }} | kubectl apply -f -"
+            else
+              echo "Kustomize not found, attempting direct kubectl apply. For kustomize, ensure it's installed."
+              # Or use: apply_command="kubectl apply -k ${{ inputs.manifest-path }}" if kubectl version supports it well
+            fi
+          fi
+
+          if eval "$apply_command --namespace \"${{ inputs.kubernetes-namespace }}\""; then
+            echo "kubectl apply command executed successfully."
+            # Optionally, wait for rollout status for Deployments, StatefulSets, etc.
+            # This requires knowing the resource names and kinds.
+            # Example for a deployment (replace <deployment-name> with actual or input):
+            # echo "Waiting for rollout status of deployment/${{ inputs.application-name }}..."
+            # if kubectl rollout status deployment/"${{ inputs.application-name }}" --namespace "${{ inputs.kubernetes-namespace }}" --timeout=5m; then
+            #   echo "Rollout successful."
+            #   echo "k8s_apply_status=success" >> $GITHUB_OUTPUT
+            # else
+            #   echo "::error::Rollout failed or timed out for deployment/${{ inputs.application-name }}."
+            #   echo "k8s_apply_status=failure_rollout" >> $GITHUB_OUTPUT
+            #   exit 1
+            # fi
+            echo "k8s_apply_status=success" >> $GITHUB_OUTPUT # Simplified: apply command success
+          else
+            echo "::error::kubectl apply command failed."
+            echo "k8s_apply_status=failure_apply" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Perform Health Check
+        id: health-check
+        # Health check runs if deploy step was successful (or at least didn't exit 1)
+        # and a health check URL is provided.
+        if: inputs.health-check-url != '' && steps.k8s-deploy-step.outputs.k8s_apply_status == 'success'
+        run: |
+          echo "Performing health check on: ${{ inputs.health-check-url }}"
+          status="unhealthy"
+          for i in $(seq 1 ${{ inputs.health-check-retries }}); do
+            echo "Attempt $i of ${{ inputs.health-check-retries }}..."
+            if curl -sfL -o /dev/null "${{ inputs.health-check-url }}"; then
+              echo "Health check successful."
+              status="healthy"
+              break
+            else
+              echo "Health check failed on attempt $i for ${{ inputs.health-check-url }}."
+              if [ $i -lt ${{ inputs.health-check-retries }} ]; then
+                echo "Waiting ${{ inputs.health-check-delay }}s before next retry..."
+                sleep ${{ inputs.health-check-delay }}
+              fi
+            fi
+          done
+          echo "Final health check status: $status"
+          echo "status=$status" >> $GITHUB_OUTPUT
+
+      - name: Set Deployment Status
+        id: set-deployment-status
+        if: always()
+        run: |
+          deploy_step_outcome="${{ steps.k8s-deploy-step.outputs.k8s_apply_status }}" # Relies on the output from deploy step
+          health_check_step_outcome="${{ steps.health-check.outputs.status || 'skipped' }}"
+          final_status="unknown"
+
+          if [[ "$deploy_step_outcome" == "success" ]]; then
+            if [[ "$health_check_step_outcome" == "healthy" ]]; then
+              final_status="success"
+            elif [[ "$health_check_step_outcome" == "unhealthy" ]]; then
+              final_status="failure_health_check"
+            elif [[ "$health_check_step_outcome" == "skipped" ]]; then
+              final_status="success_no_health_check"
+            else
+              final_status="success_health_check_unknown" # Should not happen
+            fi
+          elif [[ "$deploy_step_outcome" == "failure_apply" || "$deploy_step_outcome" == "failure_rollout" ]]; then
+            final_status="$deploy_step_outcome"
+          else # Catch-all for other deployment failures or if deploy_step_outcome is not set due to earlier exit
+            final_status="failure_deploy_k8s"
+          fi
+          
+          echo "status=$final_status" >> $GITHUB_OUTPUT
+          echo "Final Deployment Outcome: $final_status"
+          # if [[ "$final_status" != "success" && "$final_status" != "success_no_health_check" ]]; then
+          #    exit 1 # Optionally hard fail the job
+          # fi

@@ -1,0 +1,157 @@
+name: 'Organizational EF Core Database Migration'
+
+on:
+  workflow_call:
+    inputs:
+      efcore-project-path:
+        description: 'Path to the .NET project containing EF Core migrations (e.g., ./src/MyProject.Data).'
+        required: true
+        type: string
+      startup-project-path:
+        description: 'Path to the startup project for EF Core tools (e.g., ./src/MyProject.Api). Defaults to efcore-project-path if not set.'
+        required: false
+        type: string
+      dotnet-version:
+        description: '.NET SDK version to use.'
+        required: false
+        type: string
+        default: '8.0.x'
+      efcore-tool-version:
+        description: 'Version of the dotnet-ef tool to install (e.g., 8.0.0). If empty, the latest stable for the SDK might be used or installation might rely on a global tool manifest.'
+        required: false
+        type: string
+        default: '' # Let SDK resolve or use manifest, or specify e.g. '8.0.0'
+      run-backup-script:
+        description: 'Set to true to execute a database backup script before migration.'
+        required: false
+        type: boolean
+        default: false
+      backup-script-path:
+        description: 'Path to a custom database backup script (required if run-backup-script is true).'
+        required: false # Becomes required if run-backup-script is true
+        type: string
+      backup-script-runner:
+        description: 'Runner/shell for the custom backup script (e.g., bash, pwsh).'
+        required: false
+        type: string
+        default: 'bash'
+      environment-name: # For logging and context
+        description: 'Name of the target environment (e.g., dev, staging, production).'
+        required: true
+        type: string
+
+    secrets:
+      DB_CONNECTION_STRING:
+        description: 'The database connection string for the target environment.'
+        required: true
+
+    outputs:
+      migration-status:
+        description: 'Status of the database migration (success/failure).'
+        value: ${{ jobs.migrate-database.outputs.migration_outcome }}
+      backup-status:
+        description: 'Status of the database backup (success/failure/skipped).'
+        value: ${{ jobs.migrate-database.outputs.backup_outcome }}
+
+jobs:
+  migrate-database:
+    runs-on: ubuntu-latest
+    outputs:
+      migration_outcome: ${{ steps.apply-migrations.outputs.status || 'failure' }}
+      backup_outcome: ${{ steps.run-backup.outputs.status || (inputs.run-backup-script == true && 'failure' || 'skipped') }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # fetch-depth: 0 # Not typically needed for migrations unless scripts rely on git history
+
+      - name: Setup .NET SDK ${{ inputs.dotnet-version }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Install dotnet-ef tool
+        run: |
+          if [[ -n "${{ inputs.efcore-tool-version }}" ]]; then
+            echo "Installing dotnet-ef version ${{ inputs.efcore-tool-version }} as a local tool."
+            # Create a local tool manifest if it doesn't exist in the efcore-project-path
+            # This assumes efcore-project-path is a directory where a manifest can be placed or already exists.
+            # A more robust approach might be to install globally if a specific version is requested and no manifest is preferred.
+            # For now, let's try installing it as a local tool in the context of the efcore project.
+            # This requires the project to be a valid location for a tool manifest.
+            # A simpler approach for a specific version is global install, but that can have side effects.
+            # Let's assume for now if version is specified, we install it globally for simplicity in the runner.
+            dotnet tool install --global dotnet-ef --version "${{ inputs.efcore-tool-version }}"
+          else
+            echo "dotnet-ef tool version not specified. Assuming it's available via global tool manifest or SDK default."
+            # Check if already installed or rely on project's local tool manifest
+            if ! command -v dotnet-ef &> /dev/null; then
+                echo "dotnet-ef could not be found. Installing latest globally."
+                dotnet tool install --global dotnet-ef
+            else
+                echo "dotnet-ef is available."
+                dotnet-ef --version
+            fi
+          fi
+        # Ensure dotnet tools are on the PATH for global tools
+        env:
+          PATH: "${PATH}:${HOME}/.dotnet/tools"
+
+
+      - name: Run Database Backup Script
+        id: run-backup
+        if: inputs.run-backup-script == true
+        run: |
+          if [[ -z "${{ inputs.backup-script-path }}" ]]; then
+            echo "::error::Backup script path is required when run-backup-script is true."
+            echo "status=failure_missing_script" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "Executing database backup script: ${{ inputs.backup-script-path }} for environment ${{ inputs.environment-name }}"
+          # The backup script needs access to the connection string or other specific credentials
+          # Ensure it's handled securely, possibly by the script itself reading env vars
+          chmod +x ${{ inputs.backup-script-path }}
+          if ${{ inputs.backup-script-path }}; then # Assuming script exits 0 on success
+            echo "Database backup script completed successfully."
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Database backup script failed."
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1 # Fail the job if backup fails
+          fi
+        shell: ${{ inputs.backup-script-runner }}
+        env:
+          # Pass the connection string to the backup script environment if it needs it
+          DB_CONNECTION_FOR_BACKUP: ${{ secrets.DB_CONNECTION_STRING }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment-name }}
+
+
+      - name: Apply EF Core Migrations
+        id: apply-migrations
+        run: |
+          echo "Applying EF Core migrations for project: ${{ inputs.efcore-project-path }} in environment: ${{ inputs.environment-name }}"
+          startup_proj="${{ inputs.startup-project-path || inputs.efcore-project-path }}"
+          echo "Using startup project: $startup_proj"
+          
+          # The connection string is passed as an environment variable
+          # The application's DbContext should be configured to use this environment variable
+          # (e.g., via IConfiguration in its constructor or OnConfiguring method).
+          dotnet ef database update --project "${{ inputs.efcore-project-path }}" --startup-project "$startup_proj" --verbose
+          
+          # Check the exit code of the command
+          if [[ $? -eq 0 ]]; then
+            echo "EF Core migrations applied successfully."
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "::error::EF Core migrations failed."
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1 # Fail the job if migrations fail
+          fi
+        env:
+          # Standard way to pass connection string for EF Core tools if app reads from ConnectionStrings:DefaultConnection
+          # Or a custom env var name the app expects.
+          ConnectionStrings__DefaultConnection: ${{ secrets.DB_CONNECTION_STRING }} # Example name
+          # Alternatively, if your app uses a specific env var like 'MY_APP_DB_CONNECTION'
+          # MY_APP_DB_CONNECTION: ${{ secrets.DB_CONNECTION_STRING }}
+          DOTNET_ENVIRONMENT: ${{ inputs.environment-name }} # Helps app load correct appsettings.{env}.json
+          PATH: "${PATH}:${HOME}/.dotnet/tools" # Ensure dotnet-ef is found

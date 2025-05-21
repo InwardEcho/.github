@@ -1,0 +1,255 @@
+name: 'Organizational Application Deployment'
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        description: 'Target environment name (e.g., dev, test, staging, production).'
+        required: true
+        type: string
+      deployment-type:
+        description: "Deployment type/target (e.g., 'azure-app-service', 'kubernetes', 'custom-script')."
+        required: true
+        type: string # Consider enum if GHA supports it for inputs
+      artifact-path:
+        description: 'Path to the deployment package or artifact (e.g., a zip file, a directory).'
+        required: true
+        type: string
+      version:
+        description: 'Application version being deployed (for logging/tagging).'
+        required: false
+        type: string
+        default: 'N/A'
+
+      # Custom Script Inputs
+      deployment-script-path:
+        description: 'Path to a custom deployment script (if deployment-type is custom-script).'
+        required: false
+        type: string
+      deployment-script-runner:
+        description: 'Runner for custom script (e.g., bash, pwsh, python).'
+        required: false
+        type: string
+        default: 'bash'
+
+      # Azure App Service Inputs
+      azure-app-name:
+        description: 'Name of the Azure App Service (if deployment-type is azure-app-service).'
+        required: false
+        type: string
+      azure-slot-name:
+        description: 'Azure App Service deployment slot name (optional).'
+        required: false
+        type: string
+        default: 'production' # Or '' for no slot / main slot
+      # azure-publish-profile: # Alternative to service principal, but SP is preferred
+
+      # Kubernetes Inputs
+      kubernetes-manifest-path:
+        description: 'Path to Kubernetes manifest files or kustomization directory (if deployment-type is kubernetes).'
+        required: false
+        type: string
+      kubernetes-namespace:
+        description: 'Kubernetes namespace to deploy to.'
+        required: false
+        type: string
+        default: 'default'
+      # kubernetes-cluster-name: # Usually handled by kubeconfig context
+
+      # Health Check Inputs
+      health-check-url:
+        description: 'URL for a basic post-deployment health check.'
+        required: false
+        type: string
+      health-check-retries:
+        description: 'Number of retries for the health check.'
+        required: false
+        type: number
+        default: 3
+      health-check-delay: # Delay between retries
+        description: 'Delay in seconds between health check retries.'
+        required: false
+        type: number
+        default: 10
+
+    secrets:
+      # Generic secrets; specific ones might be needed per deployment type
+      AZURE_CREDENTIALS: # For Azure deployments
+        description: 'Azure Service Principal credentials (JSON object).'
+        required: false
+      KUBE_CONFIG_DATA: # For Kubernetes deployments
+        description: 'Base64 encoded Kubeconfig data for Kubernetes.'
+        required: false
+      # Add other generic secrets like DEPLOYMENT_KEY if needed for custom scripts
+
+    outputs:
+      deployment-status:
+        description: 'Status of the deployment operation (success/failure).'
+        value: ${{ jobs.deploy.outputs.deployment-outcome }}
+      health-check-status:
+        description: 'Status of the post-deployment health check (healthy/unhealthy/skipped).'
+        value: ${{ jobs.deploy.outputs.health-check-outcome }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      deployment-outcome: ${{ steps.set-deployment-status.outputs.status || 'failure' }}
+      health-check-outcome: ${{ steps.health-check.outputs.status || 'skipped' }}
+
+    environment: ${{ inputs.environment-name }} # For GitHub Environments integration
+
+    steps:
+      - name: Checkout repository (optional, if script is in repo)
+        if: inputs.deployment-type == 'custom-script' && !startsWith(inputs.deployment-script-path, '/') # If script path is relative
+        uses: actions/checkout@v4
+
+      # Step to download artifact - this should typically be done by the CALLING workflow
+      # and the path passed to this callable workflow.
+      # This template assumes 'artifact-path' is a ready-to-use path in the runner's filesystem.
+      - name: Verify Artifact Path
+        run: |
+          echo "Deploying version ${{ inputs.version }} to ${{ inputs.environment-name }} using type ${{ inputs.deployment-type }}"
+          echo "Artifact path: ${{ inputs.artifact-path }}"
+          if [ ! -e "${{ inputs.artifact-path }}" ]; then
+            echo "Error: Artifact not found at path: ${{ inputs.artifact-path }}"
+            exit 1
+          fi
+
+      # === Azure App Service Deployment ===
+      - name: Azure Login
+        if: inputs.deployment-type == 'azure-app-service' && secrets.AZURE_CREDENTIALS != ''
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure App Service
+        id: azure-deploy-step
+        if: inputs.deployment-type == 'azure-app-service' && inputs.azure-app-name != ''
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ inputs.azure-app-name }}
+          slot-name: ${{ inputs.azure-slot-name }}
+          package: ${{ inputs.artifact-path }} # Path to zip or folder
+          # publish-profile: ${{ inputs.azure-publish-profile }} # If using publish profile
+
+      # === Kubernetes Deployment ===
+      # Setup Kubeconfig (using secret)
+      - name: Setup Kubeconfig
+        if: inputs.deployment-type == 'kubernetes' && secrets.KUBE_CONFIG_DATA != ''
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+          echo "Successfully configured KUBECONFIG."
+          kubectl version --client
+
+      - name: Deploy to Kubernetes using kubectl
+        id: k8s-deploy-step
+        if: inputs.deployment-type == 'kubernetes' && inputs.kubernetes-manifest-path != ''
+        run: |
+          echo "Deploying to Kubernetes namespace: ${{ inputs.kubernetes-namespace }}"
+          # Example: using kubectl apply. This can be expanded.
+          if kubectl apply -f "${{ inputs.kubernetes-manifest-path }}" --namespace "${{ inputs.kubernetes-namespace }}"; then
+            echo "kubectl apply successful"
+            echo "k8s_apply_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "::error::kubectl apply failed"
+            echo "k8s_apply_status=failure" >> $GITHUB_OUTPUT
+            exit 1 # Fail the job if kubectl apply fails
+          fi
+          # Add rollout status check if desired:
+          # kubectl rollout status deployment/<your-deployment-name> -n "${{ inputs.kubernetes-namespace }}" --timeout=5m
+        # Alternatively, use azure/k8s-deploy@v4 for more features
+
+      # === Custom Script Deployment ===
+      - name: Execute Custom Deployment Script
+        id: custom-script-deploy-step
+        if: inputs.deployment-type == 'custom-script' && inputs.deployment-script-path != ''
+        run: |
+          chmod +x ${{ inputs.deployment-script-path }} # Ensure script is executable
+          if ${{ inputs.deployment-script-path }}; then # Pass environment variables or arguments as needed
+            echo "Custom script successful"
+            echo "custom_script_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Custom script failed"
+            echo "custom_script_status=failure" >> $GITHUB_OUTPUT
+            exit 1 # Fail the job if custom script fails
+          fi
+        shell: ${{ inputs.deployment-script-runner }}
+        # Environment variables for the script should be passed by the calling workflow's secrets
+        # and exposed here if needed, e.g., env: MY_API_KEY: ${{ secrets.CUSTOM_DEPLOY_KEY }}
+
+      # === Post-Deployment Health Check ===
+      - name: Perform Health Check
+        id: health-check
+        if: inputs.health-check-url != ''
+        run: |
+          echo "Performing health check on: ${{ inputs.health-check-url }}"
+          status="unhealthy"
+          for i in $(seq 1 ${{ inputs.health-check-retries }}); do
+            echo "Attempt $i of ${{ inputs.health-check-retries }}..."
+            # Using curl with -f to fail on HTTP errors (>=400)
+            # -s for silent, -L to follow redirects, -o /dev/null to discard output
+            if curl -sfL -o /dev/null "${{ inputs.health-check-url }}"; then
+              echo "Health check successful."
+              status="healthy"
+              break
+            else
+              echo "Health check failed on attempt $i."
+              if [ $i -lt ${{ inputs.health-check-retries }} ]; then
+                echo "Waiting ${{ inputs.health-check-delay }}s before next retry..."
+                sleep ${{ inputs.health-check-delay }}
+              fi
+            fi
+          done
+          echo "Final health check status: $status"
+          echo "status=$status" >> $GITHUB_OUTPUT
+          if [ "$status" != "healthy" ]; then
+            # Optionally fail the job if health check fails after all retries
+            # echo "::error::Health check failed after ${{ inputs.health-check-retries }} retries."
+            # exit 1 # Uncomment to make the job fail
+          fi
+
+      - name: Set Deployment Status
+        id: set-deployment-status
+        # This step assumes the job succeeded if it reached here without prior exit 1.
+        # More sophisticated status would check outputs of deployment steps.
+        run: |
+          final_status="unknown"
+          # Check Azure deployment outcome (inferred by step outcome)
+          if [[ "${{ inputs.deployment-type }}" == "azure-app-service" ]]; then
+            if [[ "${{ steps.azure-deploy-step.outcome }}" == "success" ]]; then
+              final_status="success_deploy"
+            else
+              final_status="failure_deploy_azure"
+            fi
+          # Check Kubernetes deployment outcome
+          elif [[ "${{ inputs.deployment-type }}" == "kubernetes" ]]; then
+            if [[ "${{ steps.k8s-deploy-step.outputs.k8s_apply_status }}" == "success" ]]; then
+              final_status="success_deploy"
+            else
+              final_status="failure_deploy_k8s"
+            fi
+          # Check Custom script deployment outcome
+          elif [[ "${{ inputs.deployment-type }}" == "custom-script" ]]; then
+            if [[ "${{ steps.custom-script-deploy-step.outputs.custom_script_status }}" == "success" ]]; then
+              final_status="success_deploy"
+            else
+              final_status="failure_deploy_script"
+            fi
+          else
+            final_status="failure_unknown_type" # Should not happen if inputs are validated
+          fi
+
+          # Override with health check failure if applicable and deployment was initially successful
+          if [[ "$final_status" == "success_deploy" && "${{ steps.health-check.outputs.status }}" == "unhealthy" ]]; then
+            final_status="failure_health_check"
+          elif [[ "$final_status" == "success_deploy" && "${{ steps.health-check.outputs.status }}" == "healthy" ]]; then
+            final_status="success" # Overall success
+          elif [[ "$final_status" == "success_deploy" && "${{ steps.health-check.outputs.status }}" == "skipped" ]]; then
+            final_status="success_no_health_check" # Deployed, but health not verified by this workflow
+          fi
+          
+          echo "status=$final_status" >> $GITHUB_OUTPUT

@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Version Calculator",
+    "description": "Calculates or derives application versions using GitHub-native mechanisms or tag-based strategies. Outputs a version string and supports pre-release concepts.",
+    "iconName": "git-commit",
+    "categories": ["Versioning", "CI", "Release"],
+    "filePatterns": []
+}

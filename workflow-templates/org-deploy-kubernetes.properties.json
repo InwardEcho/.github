@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Kubernetes Deployment",
+    "description": "Deploys an application to a Kubernetes cluster using kubectl. Handles environment-specific configurations, artifact deployment (via manifest references), and performs basic post-deployment health checks.",
+    "iconName": "kubernetes",
+    "categories": ["Deployment", "CD", "Kubernetes", "Containers"],
+    "filePatterns": ["kustomization.yaml", "kustomization.yml", "*.k8s.yml", "*.k8s.yaml"]
+}

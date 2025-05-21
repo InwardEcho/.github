@@ -1,0 +1,248 @@
+name: Organizational Release Notes Generation
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: 'The git tag for which to generate release notes (e.g., v1.0.0). If not provided, uses GITHUB_REF_NAME.'
+        required: false
+        type: string
+      release_name:
+        description: 'Name for the GitHub release (e.g., "Release v1.0.0"). If not provided, uses "Release ${{ inputs.tag_name || github.ref_name }}".'
+        required: false
+        type: string
+      draft_release:
+        description: 'Create the release as a draft.'
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: 'Mark the release as a pre-release.'
+        required: false
+        type: boolean
+        default: false
+      config_path:
+        description: 'Path to the release-drafter or equivalent configuration file (e.g., .github/release-drafter.yml).'
+        required: false
+        type: string
+        default: '.github/release-drafter.yml' # Common default for release-drafter
+      commitish:
+        description: 'Specifies the commitish value that determines where the Git tag is created from. Can be any branch or commit SHA. Defaults to the repository''s default branch.'
+        required: false
+        type: string
+      generate_body:
+        description: 'Whether to auto-generate the release body. If false, body_path or an empty body will be used.'
+        required: false
+        type: boolean
+        default: true
+      body_path:
+        description: 'Path to a file with the release notes body. Used if generate_body is false and this is provided.'
+        required: false
+        type: string
+      append_body:
+        description: 'Append to existing release body if the release already exists. Otherwise, the existing body is replaced.'
+        required: false
+        type: boolean
+        default: false # Default is to replace for simplicity, but append can be useful
+    secrets:
+      GITHUB_TOKEN:
+        description: 'GitHub token with permissions to create/update releases. Use secrets.GITHUB_TOKEN or a PAT.'
+        required: true
+
+jobs:
+  generate_release_notes:
+    name: Generate Release Notes
+    runs-on: ubuntu-latest
+    outputs:
+      release_url: ${{ steps.create_release.outputs.html_url || steps.update_release.outputs.html_url }}
+      release_id: ${{ steps.create_release.outputs.id || steps.update_release.outputs.id }}
+      upload_url: ${{ steps.create_release.outputs.upload_url || steps.update_release.outputs.upload_url }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history is needed for changelog generation
+
+      - name: Set Release Tag and Name
+        id: set_vars
+        run: |
+          TAG_NAME="${{ inputs.tag_name || github.ref_name }}"
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+          RELEASE_NAME="${{ inputs.release_name || format('Release {0}', TAG_NAME) }}"
+          echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Generate Changelog Body (Example using github.event.repository.generate_release_notes)
+        id: generate_changelog
+        if: inputs.generate_body == true
+        # This uses GitHub's built-in release notes generation.
+        # For more advanced generation (e.g. conventional commits),
+        # tools like 'release-drafter' or 'conventional-changelog-cli' would be used here.
+        # This example keeps it simple and relies on GitHub's native capabilities.
+        # If using a tool like release-drafter, that action would replace this step.
+        # For example, with release-drafter/release-drafter@v6:
+        # uses: release-drafter/release-drafter@v6
+        # with:
+        #   config-name: ${{ inputs.config_path }} # e.g., release-drafter.yml
+        #   publish: false # We handle publish in the next step
+        #   tag: ${{ steps.set_vars.outputs.TAG_NAME }}
+        #   name: ${{ steps.set_vars.outputs.RELEASE_NAME }}
+        #   prerelease: ${{ inputs.prerelease }}
+        #   version: ${{ steps.set_vars.outputs.TAG_NAME }} # if your config uses $VERSION
+        # env:
+        #   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        #
+        # The following uses the `actions/github-script` to call the generate release notes API
+        # This is a more direct way if you don't want a full-fledged release-drafter setup
+        # but want more control than the basic `gh release create --generate-notes`.
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              const response = await github.rest.repos.generateReleaseNotes({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: '${{ steps.set_vars.outputs.TAG_NAME }}',
+                target_commitish: '${{ inputs.commitish || github.sha }}',
+                // previous_tag_name: can be added for more accurate notes if known
+              });
+              core.setOutput('body', response.data.body);
+              core.setOutput('name', response.data.name); // GitHub might suggest a name
+            } catch (error) {
+              core.warning(`Failed to auto-generate release notes: ${error.message}. Falling back to a basic message.`);
+              core.setOutput('body', 'Automated release notes for ${{ steps.set_vars.outputs.TAG_NAME }}.');
+              core.setOutput('name', '${{ steps.set_vars.outputs.RELEASE_NAME }}');
+            }
+          result-encoding: string
+
+      - name: Prepare Release Body
+        id: prep_body
+        run: |
+          FINAL_BODY=""
+          if [ "${{ inputs.generate_body }}" == "true" ]; then
+            FINAL_BODY="${{ steps.generate_changelog.outputs.body }}"
+          elif [ -n "${{ inputs.body_path }}" ] && [ -f "${{ inputs.body_path }}" ]; then
+            FINAL_BODY=$(cat "${{ inputs.body_path }}")
+          else
+            FINAL_BODY="Release notes for ${{ steps.set_vars.outputs.TAG_NAME }}."
+          fi
+          # Escape for JSON and multiline
+          FINAL_BODY=$(echo "$FINAL_BODY" | awk '{printf "%s\\n", $0}' | sed 's/"/\\"/g')
+          echo "body_content<<EOF" >> $GITHUB_OUTPUT
+          echo "$FINAL_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Check for Existing Release
+        id: check_release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: '${{ steps.set_vars.outputs.TAG_NAME }}'
+              });
+              core.setOutput('release_id', release.data.id);
+              core.setOutput('upload_url', release.data.upload_url);
+              core.setOutput('html_url', release.data.html_url);
+              core.setOutput('exists', 'true');
+              core.setOutput('current_body', release.data.body || '');
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('exists', 'false');
+              } else {
+                core.setFailed(`Error checking for release: ${error.message}`);
+              }
+            }
+          result-encoding: string
+
+      - name: Create or Update GitHub Release
+        id: create_or_update_release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag_name = '${{ steps.set_vars.outputs.TAG_NAME }}';
+            const release_name = '${{ steps.generate_changelog.outputs.name || steps.set_vars.outputs.RELEASE_NAME }}'; // Prefer GitHub generated name if available
+            let body = `${process.env.FINAL_BODY_CONTENT}`; // from prep_body
+            const draft = ${{ inputs.draft_release }};
+            const prerelease = ${{ inputs.prerelease }};
+            const commitish = '${{ inputs.commitish || github.sha }}'; // Default to current SHA if not specified
+            const release_exists = '${{ steps.check_release.outputs.exists }}' === 'true';
+            const release_id = Number('${{ steps.check_release.outputs.release_id }}');
+            const append_body = ${{ inputs.append_body }};
+            const current_body = `${process.env.CURRENT_RELEASE_BODY}`; // from check_release
+
+            if (release_exists) {
+              core.info(`Updating existing release for tag ${tag_name} (ID: ${release_id})`);
+              if (append_body) {
+                body = current_body + "\n\n---\n\n" + body;
+              }
+              const response = await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release_id,
+                tag_name: tag_name, // Should not change if updating by ID, but good to include
+                name: release_name,
+                body: body,
+                draft: draft,
+                prerelease: prerelease
+              });
+              core.setOutput('id', response.data.id);
+              core.setOutput('html_url', response.data.html_url);
+              core.setOutput('upload_url', response.data.upload_url);
+            } else {
+              core.info(`Creating new release for tag ${tag_name}`);
+              const response = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag_name,
+                name: release_name,
+                body: body,
+                draft: draft,
+                prerelease: prerelease,
+                target_commitish: commitish
+              });
+              core.setOutput('id', response.data.id);
+              core.setOutput('html_url', response.data.html_url);
+              core.setOutput('upload_url', response.data.upload_url);
+            }
+        env:
+          FINAL_BODY_CONTENT: ${{ steps.prep_body.outputs.body_content }}
+          CURRENT_RELEASE_BODY: ${{ steps.check_release.outputs.current_body }}
+
+
+      - name: Release Notes Summary
+        run: |
+          echo "## Release Notes Generation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** ${{ steps.set_vars.outputs.TAG_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release Name:** ${{ steps.generate_changelog.outputs.name || steps.set_vars.outputs.RELEASE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ steps.check_release.outputs.exists == 'true' && 'Updated existing release' || 'Created new release' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Draft:** ${{ inputs.draft_release }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Prerelease:** ${{ inputs.prerelease }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release URL:** ${{ steps.create_or_update_release.outputs.html_url }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.generate_body }}" == "true" ]; then
+            echo "- **Body Source:** Auto-generated" >> $GITHUB_STEP_SUMMARY
+          elif [ -n "${{ inputs.body_path }}" ]; then
+            echo "- **Body Source:** File (${{ inputs.body_path }})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Body Source:** Default text" >> $GITHUB_STEP_SUMMARY
+          fi
+        shell: bash
+
+    # Legacy output names for compatibility if needed by older workflows calling this
+    outputs:
+      release_notes_body: ${{ steps.prep_body.outputs.body_content }}
+      # For release-drafter like output:
+      # id: ${{ steps.create_or_update_release.outputs.id }}
+      # html_url: ${{ steps.create_or_update_release.outputs.html_url }}
+      # upload_url: ${{ steps.create_or_update_release.outputs.upload_url }}
+      # name: ${{ steps.generate_changelog.outputs.name || steps.set_vars.outputs.RELEASE_NAME }}
+      # tag_name: ${{ steps.set_vars.outputs.TAG_NAME }}
+      # body: ${{ steps.prep_body.outputs.body_content }}

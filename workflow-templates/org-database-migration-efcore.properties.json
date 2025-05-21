@@ -1,0 +1,7 @@
+{
+    "name": "Organizational EF Core Database Migration",
+    "description": "Manages Entity Framework Core database schema migrations. Features optional backup, applies migrations, and handles environment-specific connection strings via secrets.",
+    "iconName": "database",
+    "categories": ["Database", "Migrations", "EFCore", ".NET", "CD"],
+    "filePatterns": ["*.csproj"]
+}

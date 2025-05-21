@@ -1,0 +1,97 @@
+name: 'Organizational NuGet Package Publisher'
+
+on:
+  workflow_call:
+    inputs:
+      package-path:
+        description: 'Path to the directory containing .nupkg files or a specific .nupkg file to publish.'
+        required: true
+        type: string
+      package-version: # Though GitVersion might set this, explicitly passing it ensures clarity
+        description: 'The version of the package being published. Used for logging and potentially for source URL construction.'
+        required: true
+        type: string
+      nuget-feed-url:
+        description: 'The NuGet feed URL to publish to.'
+        required: false
+        type: string
+        default: 'https://nuget.pkg.github.com/OWNER' # Replace OWNER or make it an input
+      # It's better to make the owner/organization an input if defaulting to GitHub Packages
+      github-owner:
+        description: 'GitHub repository owner (organization or user) for GitHub Packages. Required if nuget-feed-url is for GitHub Packages and not fully specified.'
+        required: false # Becomes required if default GPR is used
+        type: string
+      dotnet-version:
+        description: '.NET SDK version to use for publishing.'
+        required: false
+        type: string
+        default: '8.0.x'
+    secrets:
+      NUGET_API_KEY_SECRET: # Define a secret that the caller workflow will pass
+        description: 'The API key for authenticating to the NuGet feed.'
+        required: true
+
+jobs:
+  publish-nuget:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup .NET SDK ${{ inputs.dotnet-version }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Determine NuGet Source URL
+        id: nuget-source
+        run: |
+          url="${{ inputs.nuget-feed-url }}"
+          if [[ "${{ inputs.nuget-feed-url }}" == 'https://nuget.pkg.github.com/OWNER' ]]; then
+            if [[ -z "${{ inputs.github-owner }}" ]]; then
+              echo "Error: github-owner input is required when using the default GitHub Packages URL."
+              exit 1
+            fi
+            url="https://nuget.pkg.github.com/${{ inputs.github-owner }}"
+          fi
+          echo "source_url=$url" >> $GITHUB_OUTPUT
+
+      - name: Download NuGet Package Artifact (if applicable)
+        # This step assumes the nupkg is produced by a previous job in the *calling* workflow
+        # and made available as an artifact. If the nupkg is in the repo, this is not needed.
+        # For a generic template, it's safer to assume the caller provides the path directly.
+        # If the path is to an artifact, the caller should download it first.
+        # This template will just use the provided 'package-path'.
+        run: echo "Assuming package(s) are available at ${{ inputs.package-path }}"
+
+      - name: Publish NuGet Package(s)
+        run: |
+          echo "Publishing NuGet package(s) from ${{ inputs.package-path }}"
+          echo "Package Version: ${{ inputs.package-version }}"
+          echo "Target Feed: ${{ steps.nuget-source.outputs.source_url }}"
+
+          # Find all .nupkg files if package-path is a directory
+          # If package-path is a file, it will just use that one file
+          find_cmd="find ${{ inputs.package-path }} -name '*.nupkg' -print0"
+          if [[ -f "${{ inputs.package-path }}" && "${{ inputs.package-path }}" == *.nupkg ]]; then
+            find_cmd="find $(dirname ${{ inputs.package-path }}) -name $(basename ${{ inputs.package-path }}) -print0"
+          elif [[ ! -d "${{ inputs.package-path }}" && ! -f "${{ inputs.package-path }}" ]]; then
+            echo "Error: package-path '${{ inputs.package-path }}' is not a valid file or directory."
+            exit 1
+          fi
+          
+          package_count=0
+          while IFS= read -r -d $'\0' package_file; do
+            echo "Publishing $package_file..."
+            dotnet nuget push "$package_file" \
+              --api-key "${{ secrets.NUGET_API_KEY_SECRET }}" \
+              --source "${{ steps.nuget-source.outputs.source_url }}" \
+              --skip-duplicate # Optional: skip if package version already exists
+            package_count=$((package_count + 1))
+          done < <(eval $find_cmd)
+
+          if [[ $package_count -eq 0 ]]; then
+            echo "Warning: No .nupkg files found in ${{ inputs.package-path }} to publish."
+            # Potentially exit 1 if this should be an error
+          else
+            echo "Successfully attempted to publish $package_count package(s)."
+          fi
+        env:
+          DOTNET_SYSTEM_NET_HTTP_USESOCKETSHTTPHANDLER: 0 # Workaround for potential issues in some environments

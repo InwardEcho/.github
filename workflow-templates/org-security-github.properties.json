@@ -1,0 +1,7 @@
+{
+    "name": "Organizational GitHub Security Scan",
+    "description": "Orchestrates GitHub's native security features: CodeQL (SAST), secret scanning, and dependency review. Provides configuration options for these tools.",
+    "iconName": "shield-check",
+    "categories": ["Security", "SAST", "DevSecOps", "GitHub Actions"],
+    "filePatterns": []
+}

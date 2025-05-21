@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Dependency Update Automation",
+    "description": "Configures and manages automated dependency updates using Dependabot. This template helps ensure a base Dependabot configuration is present or provides guidance. It can also be extended to trigger actions after Dependabot PRs are merged.",
+    "iconName": "sync",
+    "categories": ["Dependencies", "Security", "Maintenance"],
+    "filePatterns": ["dependabot.yml", ".github/dependabot.yml"]
+}

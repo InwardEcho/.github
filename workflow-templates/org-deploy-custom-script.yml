@@ -1,0 +1,138 @@
+name: Organizational Custom Script Deployment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target deployment environment (e.g., dev, staging, prod)'
+        required: true
+        type: string
+      artifact_path:
+        description: 'Path to the deployment artifact (e.g., ./dist, myapp.zip)'
+        required: true
+        type: string
+      deployment_script:
+        description: 'Path to the custom deployment script (e.g., ./deploy.sh, scripts/deploy.ps1)'
+        required: true
+        type: string
+      script_arguments:
+        description: 'Additional arguments to pass to the deployment script'
+        required: false
+        type: string
+      service_name:
+        description: 'Name of the service being deployed (for tagging and identification)'
+        required: true
+        type: string
+      version:
+        description: 'Version of the application being deployed'
+        required: true
+        type: string
+      health_check_url:
+        description: 'URL for post-deployment health check (optional)'
+        required: false
+        type: string
+      timeout_minutes:
+        description: 'Deployment timeout in minutes'
+        required: false
+        type: number
+        default: 15
+    secrets:
+      ENV_SPECIFIC_CONFIG:
+        description: 'Environment-specific configuration (e.g., connection strings, API keys)'
+        required: false # Depending on script, might be injected differently
+      SSH_PRIVATE_KEY:
+        description: 'SSH private key for accessing deployment targets (if needed by script)'
+        required: false
+      DEPLOYMENT_USER:
+        description: 'Username for deployment (if needed by script)'
+        required: false
+      DEPLOYMENT_PASSWORD:
+        description: 'Password for deployment (if needed by script)'
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.service_name }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Artifact (if not in repo)
+        if: "!startsWith(inputs.artifact_path, './')" # Basic check if artifact_path is a local path
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_path }} # Assuming artifact name matches path for simplicity
+          path: ./downloaded-artifact
+        # Note: This step assumes the artifact was uploaded with a name that matches `inputs.artifact_path`.
+        # A more robust solution might involve passing artifact name as a separate input.
+
+      - name: Set Artifact Path Variable
+        id: set_artifact_path
+        run: |
+          if [[ "${{ inputs.artifact_path }}" == "./"* ]]; then
+            echo "resolved_artifact_path=${{ inputs.artifact_path }}" >> $GITHUB_OUTPUT
+          else
+            echo "resolved_artifact_path=./downloaded-artifact" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Environment Variables
+        run: |
+          echo "DEPLOY_ENV=${{ inputs.environment }}" >> $GITHUB_ENV
+          echo "APP_VERSION=${{ inputs.version }}" >> $GITHUB_ENV
+          echo "SERVICE_NAME=${{ inputs.service_name }}" >> $GITHUB_ENV
+          # Add more standard environment variables if needed by scripts
+
+      - name: Inject Environment-Specific Configuration
+        if: secrets.ENV_SPECIFIC_CONFIG
+        run: |
+          echo "Injecting environment-specific configuration..."
+          # Example: Create a .env file or replace placeholders in a config template
+          # This is highly dependent on how the custom script expects configuration.
+          # For instance, if the script expects a .env file:
+          # echo "${{ secrets.ENV_SPECIFIC_CONFIG }}" > .env
+          # Or if it expects specific env vars:
+          # echo "DB_CONNECTION_STRING=$(echo '${{ secrets.ENV_SPECIFIC_CONFIG }}' | jq -r .dbConnectionString)" >> $GITHUB_ENV
+          # The user needs to adapt this step to their script's needs.
+          echo "Placeholder for user-defined config injection logic based on ENV_SPECIFIC_CONFIG secret."
+          echo "The custom script at ${{ inputs.deployment_script }} should handle this."
+
+      - name: Execute Custom Deployment Script
+        env:
+          ARTIFACT_PATH: ${{ steps.set_artifact_path.outputs.resolved_artifact_path }}
+          SCRIPT_ARGUMENTS: ${{ inputs.script_arguments }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOYMENT_USER: ${{ secrets.DEPLOYMENT_USER }}
+          DEPLOYMENT_PASSWORD: ${{ secrets.DEPLOYMENT_PASSWORD }}
+        run: |
+          echo "Executing deployment script: ${{ inputs.deployment_script }}"
+          chmod +x ${{ inputs.deployment_script }}
+          ${{ inputs.deployment_script }} ${{ inputs.script_arguments }}
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+
+      - name: Post-Deployment Health Check
+        if: inputs.health_check_url
+        run: |
+          echo "Performing health check on ${{ inputs.health_check_url }}..."
+          response_code=$(curl -s -o /dev/null -w "%{http_code}" ${{ inputs.health_check_url }} --max-time 60)
+          if [ "$response_code" -ge 200 ] && [ "$response_code" -lt 300 ]; then
+            echo "Health check passed with status code $response_code."
+          else
+            echo "Health check failed with status code $response_code."
+            exit 1
+          fi
+        timeout-minutes: 5
+
+      - name: Deployment Summary
+        run: |
+          echo "## Custom Script Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Script Used:** ${{ inputs.deployment_script }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.health_check_url }}" ]; then
+            echo "- **Health Check:** ${{ inputs.health_check_url }} (Passed)" >> $GITHUB_STEP_SUMMARY
+          fi

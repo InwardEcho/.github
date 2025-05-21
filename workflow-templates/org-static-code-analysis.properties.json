@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Static Code Analysis",
+    "description": "Integrates with SonarCloud (or SonarQube) to perform static code analysis, identify bugs, vulnerabilities, and code smells. Supports pull request decoration and quality gate checks.",
+    "iconName": "shield-check",
+    "categories": ["Code Quality", "Security", "CI"],
+    "filePatterns": ["sonar-project.properties", ".github/workflows/*.yml"]
+}

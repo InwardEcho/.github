@@ -1,0 +1,7 @@
+{
+    "name": "Organizational Custom Script Deployment",
+    "description": "Deploys an application using a custom user-provided script. Handles environment-specific configurations, artifact deployment (passed to script), and performs basic post-deployment health checks.",
+    "iconName": "terminal",
+    "categories": ["Deployment", "CD", "CustomScript"],
+    "filePatterns": ["deploy.sh", "deploy.ps1", "deploy.py"]
+}

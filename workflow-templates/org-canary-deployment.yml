@@ -1,0 +1,211 @@
+name: 'Organizational Canary Deployment Orchestrator'
+
+on:
+  workflow_call:
+    inputs:
+      # --- General Inputs ---
+      environment-name-stable: # e.g., "production"
+        description: 'Name of the main/stable environment (for full rollout and GitHub Environment integration).'
+        required: true
+        type: string
+      environment-name-canary: # e.g., "production-canary" or just "production" if using slots/subsets
+        description: 'Name of the environment/subset for canary deployment.'
+        required: true
+        type: string
+      application-version-new:
+        description: 'The new application version to be canary deployed.'
+        required: true
+        type: string
+      application-version-stable: # Needed for rollback
+        description: 'The current stable application version (for rollback scenarios).'
+        required: true
+        type: string
+      artifact-path-new-version:
+        description: 'Path to the deployment artifact for the new version.'
+        required: true
+        type: string
+      artifact-path-stable-version: # Needed for rollback
+        description: 'Path to the deployment artifact for the stable version (for rollback).'
+        required: true
+        type: string
+      deployment-workflow-ref:
+        description: 'Reference to the callable deployment workflow (e.g., org/repo/.github/workflows/org-deploy-environment.yml@main).'
+        required: true
+        type: string
+
+      # --- Canary Phase Inputs ---
+      canary-deployment-parameters:
+        description: 'JSON string of parameters for deploying the new version to the canary environment/subset.'
+        required: true
+        type: string
+      monitoring-script-path:
+        description: 'Path to a custom script that monitors canary health and exits 0 for healthy, non-zero for unhealthy.'
+        required: false # If not provided, manual judgment or a simple wait might be assumed
+        type: string
+      monitoring-duration-seconds:
+        description: 'Duration in seconds to run/wait for monitoring. If no script, this is a wait time.'
+        required: false
+        type: number
+        default: 300 # 5 minutes
+
+      # --- Full Rollout / Rollback Inputs ---
+      stable-deployment-parameters: # For full rollout of new version
+        description: 'JSON string of parameters for deploying the new version to the stable environment.'
+        required: true
+        type: string
+      rollback-deployment-parameters: # For rolling back stable env to stable version
+        description: 'JSON string of parameters for deploying the stable version back to the stable environment (if needed).'
+        required: true
+        type: string
+      # Manual approval for full rollout is typically handled by GitHub Environments on the stable env.
+
+    secrets: # Pass-through secrets for the deployment workflow
+      AZURE_CREDENTIALS:
+        required: false
+      KUBE_CONFIG_DATA:
+        required: false
+      # Add any other secrets that org-deploy-environment.yml might need
+
+    outputs:
+      canary-status:
+        description: 'Status of the canary deployment and monitoring phase (success/failure).'
+        value: ${{ jobs.monitor_canary.outputs.canary_health_status }}
+      overall-status:
+        description: 'Overall status of the canary deployment process (promoted/rolled_back/failed).'
+        value: ${{ jobs.decide_and_act.outputs.final_status }}
+
+jobs:
+  deploy_canary:
+    runs-on: ubuntu-latest
+    outputs:
+      deployment_status: ${{ steps.deploy-c.outputs.deployment-status }} # from org-deploy-environment
+    steps:
+      - name: Log Canary Deployment
+        run: echo "Deploying new version ${{ inputs.application-version-new }} to canary environment ${{ inputs.environment-name-canary }}."
+
+      - name: Deploy New Version to Canary
+        id: deploy-c
+        uses: ${{ inputs.deployment-workflow-ref }}
+        with:
+          environment-name: ${{ inputs.environment-name-canary }}
+          artifact-path: ${{ inputs.artifact-path-new-version }}
+          version: ${{ inputs.application-version-new }}
+          # Dynamically pass parameters - requires org-deploy-environment to handle JSON or list them out
+          deployment-type: ${{ fromJson(inputs.canary-deployment-parameters).deployment-type }}
+          # Add all other relevant parameters from canary-deployment-parameters...
+          # This is a simplification; a robust solution might need a helper action to parse and pass all params.
+          azure-app-name: ${{ fromJson(inputs.canary-deployment-parameters).azure-app-name || '' }}
+          # ... etc.
+        secrets: inherit # Pass all secrets from the caller
+
+  monitor_canary:
+    needs: deploy_canary
+    runs-on: ubuntu-latest
+    if: needs.deploy_canary.outputs.deployment_status == 'success' # Assuming 'success' output from deploy
+    outputs:
+      canary_health_status: ${{ steps.run-monitor-script.outputs.health || steps.wait-monitoring-period.outputs.health }}
+    steps:
+      - name: Checkout Monitoring Script (if provided)
+        if: inputs.monitoring-script-path != ''
+        uses: actions/checkout@v4 # Assumes script is in the repo
+
+      - name: Run Monitoring Script
+        id: run-monitor-script
+        if: inputs.monitoring-script-path != ''
+        run: |
+          echo "Running monitoring script: ${{ inputs.monitoring-script-path }} for ${{ inputs.monitoring-duration-seconds }}s."
+          # Script should control its own duration or be killed after timeout
+          # For simplicity, this example assumes the script manages its execution time or is short-lived.
+          # A timeout wrapper might be needed for long-running scripts.
+          chmod +x ${{ inputs.monitoring-script-path }}
+          if timeout ${{ inputs.monitoring-duration-seconds }} ${{ inputs.monitoring-script-path }}; then
+            echo "Monitoring script reported canary as healthy."
+            echo "health=healthy" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Monitoring script reported canary as unhealthy or timed out."
+            echo "health=unhealthy" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Wait for Monitoring Period (if no script)
+        id: wait-monitoring-period
+        if: inputs.monitoring-script-path == ''
+        run: |
+          echo "No monitoring script provided. Waiting for ${{ inputs.monitoring-duration-seconds }} seconds."
+          sleep ${{ inputs.monitoring-duration-seconds }}
+          echo "Monitoring period complete. Assuming healthy for manual verification."
+          echo "health=healthy_manual_check" >> $GITHUB_OUTPUT # Indicates manual check needed
+
+  decide_and_act:
+    needs: monitor_canary
+    runs-on: ubuntu-latest
+    # This job would typically be associated with a GitHub Environment (e.g., "production")
+    # that requires manual approval if monitor_canary.outputs.canary_health_status is 'healthy'.
+    environment: ${{ inputs.environment-name-stable }} # For manual approval gate on stable env
+    outputs:
+      final_status: ${{ steps.set-final-status.outputs.status }}
+    steps:
+      - name: Decision Logic
+        id: decision
+        run: |
+          canary_health="${{ needs.monitor_canary.outputs.canary_health_status }}"
+          echo "Canary health status: $canary_health"
+          if [[ "$canary_health" == "healthy" || "$canary_health" == "healthy_manual_check" ]]; then
+            echo "Canary is healthy. Proceeding with full rollout to ${{ inputs.environment-name-stable }}."
+            echo "action=promote" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Canary is unhealthy. Initiating rollback."
+            echo "action=rollback" >> $GITHUB_OUTPUT
+          fi
+
+      # This is where manual approval for 'promote' would gate if this job is part of a protected environment.
+      - name: Log Approval (Simulated)
+        if: steps.decision.outputs.action == 'promote'
+        run: echo "Manual approval for full rollout to ${{ inputs.environment-name-stable }} received (simulated by environment protection rule)."
+
+      - name: Full Rollout (Promote)
+        if: steps.decision.outputs.action == 'promote'
+        id: full-rollout
+        uses: ${{ inputs.deployment-workflow-ref }}
+        with:
+          environment-name: ${{ inputs.environment-name-stable }}
+          artifact-path: ${{ inputs.artifact-path-new-version }}
+          version: ${{ inputs.application-version-new }}
+          deployment-type: ${{ fromJson(inputs.stable-deployment-parameters).deployment-type }}
+          # ... pass all other params from stable-deployment-parameters
+          azure-app-name: ${{ fromJson(inputs.stable-deployment-parameters).azure-app-name || '' }}
+          # ... etc.
+        secrets: inherit
+
+      - name: Rollback Action
+        if: steps.decision.outputs.action == 'rollback'
+        id: rollback
+        uses: ${{ inputs.deployment-workflow-ref }}
+        # This deploys the *stable* version back to the *stable* environment.
+        # Or, it could deploy stable to canary, or just delete canary. This depends on strategy.
+        # For this example, we assume rolling back the main environment if canary fails.
+        with:
+          environment-name: ${{ inputs.environment-name-stable }} # Or canary, depending on strategy
+          artifact-path: ${{ inputs.artifact-path-stable-version }}
+          version: ${{ inputs.application-version-stable }}
+          deployment-type: ${{ fromJson(inputs.rollback-deployment-parameters).deployment-type }}
+          # ... pass all other params from rollback-deployment-parameters
+          azure-app-name: ${{ fromJson(inputs.rollback-deployment-parameters).azure-app-name || '' }}
+          # ... etc.
+        secrets: inherit
+
+      - name: Set Final Status
+        id: set-final-status
+        if: always()
+        run: |
+          if [[ "${{ steps.decision.outputs.action }}" == "promote" && "${{ steps.full-rollout.outputs.deployment-status }}" == "success" ]]; then
+            echo "status=promoted" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.decision.outputs.action }}" == "rollback" && "${{ steps.rollback.outputs.deployment-status }}" == "success" ]]; then
+            echo "status=rolled_back" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.decision.outputs.action }}" == "promote" ]]; then
+            echo "status=promotion_failed" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.decision.outputs.action }}" == "rollback" ]]; then
+            echo "status=rollback_failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=unknown_failure" >> $GITHUB_OUTPUT
+          fi

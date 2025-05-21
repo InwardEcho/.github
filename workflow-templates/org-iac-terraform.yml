@@ -1,0 +1,236 @@
+name: 'Organizational Terraform IaC Operations'
+
+on:
+  workflow_call:
+    inputs:
+      terraform-version:
+        description: 'Version of Terraform CLI to use (e.g., 1.0.0, latest).'
+        required: false
+        type: string
+        default: 'latest'
+      working-directory:
+        description: 'Path to the directory containing Terraform configuration files.'
+        required: false
+        type: string
+        default: '.'
+      command:
+        description: 'Terraform command to execute (init, validate, fmt, plan, apply).'
+        required: true
+        type: string
+      workspace:
+        description: 'Terraform workspace to select/create and use.'
+        required: false # Often environments imply workspaces
+        type: string
+        default: 'default'
+      backend-config:
+        description: 'Backend configuration for Terraform init (e.g., key=value or path to a .hcl file).'
+        required: false
+        type: string
+        default: ''
+      backend-config-file: # Alternative to backend-config string
+        description: 'Path to a backend configuration file (.hcl or .tfbackend).'
+        required: false
+        type: string
+        default: ''
+      var-file:
+        description: 'Path to a Terraform variable file (.tfvars).'
+        required: false
+        type: string
+        default: ''
+      plan-output-file:
+        description: 'Filename for the Terraform plan output (used with "plan" command).'
+        required: false
+        type: string
+        default: 'tfplan.out'
+      apply-auto-approve:
+        description: 'Set to true for "terraform apply -auto-approve". Use with caution.'
+        required: false
+        type: boolean
+        default: false
+      upload-plan-artifact:
+        description: 'Set to true to upload the Terraform plan file as an artifact.'
+        required: false
+        type: boolean
+        default: false
+      plan-artifact-name:
+        description: 'Name for the uploaded Terraform plan artifact.'
+        required: false
+        type: string
+        default: 'terraform-plan'
+      cloud-provider:
+        description: 'Cloud provider for specific setup (e.g., aws, azure, gcp, none).'
+        required: false
+        type: string
+        default: 'none' # Default to no specific provider setup
+      aws-region: # Example provider-specific input
+        description: 'AWS region, required if cloud-provider is aws.'
+        required: false
+        type: string
+      run-tfsec-scan:
+        description: 'Set to true to run tfsec IaC scan.'
+        required: false
+        type: boolean
+        default: false # Default to false, can be enabled by caller
+      tfsec-sarif-file:
+        description: 'Filename for the SARIF output from tfsec (e.g., tfsec-results.sarif).'
+        required: false
+        type: string
+        default: 'tfsec-results.sarif'
+      upload-tfsec-sarif:
+        description: 'Set to true to upload the tfsec SARIF results to GitHub Security tab.'
+        required: false
+        type: boolean
+        default: false
+      # Cloud provider credentials (AWS_ACCESS_KEY_ID, ARM_CLIENT_ID etc.)
+      # should be passed as secrets by the calling workflow and set as environment variables.
+      # This template does not explicitly define them as inputs to remain generic, but expects them as secrets.
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        description: 'AWS Access Key ID. Required if cloud-provider is aws.'
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        description: 'AWS Secret Access Key. Required if cloud-provider is aws.'
+        required: false
+      AZURE_CREDENTIALS:
+        description: 'Azure Service Principal credentials (JSON object). Required if cloud-provider is azure.'
+        required: false
+      # Add other provider-specific secrets here e.g. GOOGLE_CREDENTIALS
+    outputs:
+      plan-json-output: # If plan is run with -json
+        description: 'JSON output of the terraform plan if -json flag was used.'
+        value: ${{ jobs.terraform-operation.outputs.plan-json }}
+      plan-file-path:
+        description: 'Path to the generated plan file (if command was "plan").'
+        value: ${{ jobs.terraform-operation.outputs.plan-file }}
+      # Add more outputs as needed, e.g., apply result summary
+
+jobs:
+  terraform-operation:
+    runs-on: ubuntu-latest
+    outputs:
+      plan-json: ${{ steps.tf-plan.outputs.json }}
+      plan-file: ${{ inputs.working-directory }}/${{ inputs.plan-output-file }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # No fetch-depth needed typically for Terraform
+
+      - name: Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          # terraform_wrapper: true # If using TF_CLOUD_ORGANIZATION_TOKEN
+
+      - name: Configure AWS Credentials
+        if: inputs.cloud-provider == 'aws' && secrets.AWS_ACCESS_KEY_ID != null && secrets.AWS_SECRET_ACCESS_KEY != null && inputs.aws-region != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Azure Login
+        if: inputs.cloud-provider == 'azure' && secrets.AZURE_CREDENTIALS != null
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: false # Save runner time by not enabling PowerShell session if not needed for TF
+
+      # Add similar blocks for GCP or other providers if needed
+
+      - name: Terraform Init
+        id: tf-init
+        run: |
+          terraform -chdir="${{ inputs.working-directory }}" init \
+            ${{ inputs.backend-config != '' && format('-backend-config="{0}"', inputs.backend-config) || '' }} \
+            ${{ inputs.backend-config-file != '' && format('-backend-config="{0}"', inputs.backend-config-file) || '' }} \
+            -input=false -no-color
+        # Environment variables for backend credentials (e.g., AWS_ACCESS_KEY_ID)
+        # must be set by the calling workflow's secrets.
+
+      - name: Select or Create Terraform Workspace
+        if: inputs.workspace != 'default' # 'default' workspace always exists
+        run: |
+          terraform -chdir="${{ inputs.working-directory }}" workspace select ${{ inputs.workspace }} || \
+          terraform -chdir="${{ inputs.working-directory }}" workspace new ${{ inputs.workspace }}
+        # Consider error handling if workspace creation is not desired implicitly
+
+      - name: Terraform Validate
+        if: inputs.command == 'validate'
+        run: terraform -chdir="${{ inputs.working-directory }}" validate -no-color
+
+      - name: Terraform Format Check
+        if: inputs.command == 'fmt'
+        run: terraform -chdir="${{ inputs.working-directory }}" fmt -check -no-color
+        # Use `terraform fmt -write=true -recursive` to actually format
+
+      - name: Terraform Plan
+        id: tf-plan
+        if: inputs.command == 'plan'
+        run: |
+          terraform -chdir="${{ inputs.working-directory }}" plan \
+            ${{ inputs.var-file != '' && format('-var-file="{0}"', inputs.var-file) || '' }} \
+            -out="${{ inputs.plan-output-file }}" \
+            -input=false -no-color
+          # Generate JSON output from the plan file
+          terraform -chdir="${{ inputs.working-directory }}" show -json "${{ inputs.plan-output-file }}" > "${{ inputs.working-directory }}/${{ inputs.plan-output-file }}.json"
+          # Read the JSON content and set it as an output. Escape newlines and quotes for multiline JSON.
+          json_output=$(cat "${{ inputs.working-directory }}/${{ inputs.plan-output-file }}.json" | jq -c .)
+          echo "json=$json_output" >> $GITHUB_OUTPUT
+
+      - name: Upload Terraform Plan Artifact
+        if: inputs.command == 'plan' && steps.tf-plan.outcome == 'success' && inputs.upload-plan-artifact == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.plan-artifact-name }}
+          path: ${{ inputs.working-directory }}/${{ inputs.plan-output-file }}
+          retention-days: 7 # Or make this configurable
+
+      - name: Run tfsec IaC Scan
+        if: inputs.run-tfsec-scan == true
+        uses: aquasecurity/tfsec-action@v1.0.3 # Pinned to a specific version
+        with:
+          working_directory: ${{ inputs.working-directory }}
+          format: sarif
+          output: ${{ inputs.tfsec-sarif-file }}
+          # soft_fail: true # Set to true if you don't want the workflow to fail on tfsec issues
+
+      - name: Upload tfsec SARIF
+        if: inputs.run-tfsec-scan == true && inputs.upload-tfsec-sarif == true # && tfsec step was successful and file exists
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ inputs.working-directory }}/${{ inputs.tfsec-sarif-file }} # Ensure path is correct
+
+      - name: Terraform Apply
+        if: inputs.command == 'apply'
+        run: |
+          apply_args="-input=false -no-color"
+          plan_file_path="${{ inputs.working-directory }}/${{ inputs.plan-output-file }}"
+
+          if [[ "${{ inputs.apply-auto-approve }}" == "true" ]]; then
+            apply_args="$apply_args -auto-approve"
+          fi
+          
+          # Always use the plan file if it exists for the apply command.
+          # If auto-approve is true, it applies the plan non-interactively.
+          # If auto-approve is false, it applies the plan interactively (or as per TF default for plan files).
+          if [[ -f "$plan_file_path" ]]; then
+             echo "Applying with plan file: $plan_file_path"
+             terraform -chdir="${{ inputs.working-directory }}" apply $apply_args "$plan_file_path"
+          elif [[ "${{ inputs.apply-auto-approve }}" == "true" ]]; then
+             # If no plan file, but auto-approve is true, apply directly with var-file if specified.
+             echo "No plan file found. Applying directly with auto-approve."
+             terraform -chdir="${{ inputs.working-directory }}" apply $apply_args \
+               ${{ inputs.var-file != '' && format('-var-file="{0}"', inputs.var-file) || '' }}
+          else
+             # No plan file and no auto-approve. This will likely prompt or fail.
+             echo "Warning: Applying without a plan file and without auto-approve. This might be interactive or fail."
+             echo "Consider generating a plan file first or setting apply-auto-approve to true for non-interactive apply."
+             terraform -chdir="${{ inputs.working-directory }}" apply $apply_args \
+               ${{ inputs.var-file != '' && format('-var-file="{0}"', inputs.var-file) || '' }}
+          fi
+        # Environment variables for provider credentials must be set.
+
+      # Future enhancements:
+      # - Integrate with tools like tfsec or checkov for security scanning IaC.

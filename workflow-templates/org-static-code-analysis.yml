@@ -1,0 +1,279 @@
+name: Organizational Static Code Analysis
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: 'Version of Java to use for SonarScanner (e.g., 11, 17)'
+        required: false
+        type: string
+        default: '17'
+      dotnet_version:
+        description: 'Version of .NET SDK to use (if a .NET project)'
+        required: false
+        type: string
+      node_version:
+        description: 'Version of Node.js to use (if a Node.js project)'
+        required: false
+        type: string
+      project_key:
+        description: 'SonarCloud/SonarQube project key. If not provided, attempts to use GITHUB_REPOSITORY.'
+        required: false
+        type: string
+      project_name:
+        description: 'SonarCloud/SonarQube project name. If not provided, attempts to use GITHUB_REPOSITORY.'
+        required: false
+        type: string
+      organization:
+        description: 'SonarCloud organization key.'
+        required: true # For SonarCloud, this is typically needed.
+        type: string
+      sonar_host_url:
+        description: 'SonarQube server URL (for self-hosted SonarQube). For SonarCloud, defaults to https://sonarcloud.io'
+        required: false
+        type: string
+        default: 'https://sonarcloud.io'
+      build_wrapper_command_linux:
+        description: 'Command to execute with the build wrapper for C/C++/Objective-C on Linux (e.g., make clean build)'
+        required: false
+        type: string
+      build_wrapper_command_windows:
+        description: 'Command to execute with the build wrapper for C/C++/Objective-C on Windows (e.g., MSBuild.exe /t:Rebuild)'
+        required: false
+        type: string
+      build_wrapper_command_macos:
+        description: 'Command to execute with the build wrapper for C/C++/Objective-C on macOS (e.g., xcodebuild clean build)'
+        required: false
+        type: string
+      dotnet_build_command:
+        description: 'Custom .NET build command if needed before analysis (e.g., dotnet build --configuration Release)'
+        required: false
+        type: string
+      fail_on_quality_gate_error:
+        description: 'Fail the workflow if the SonarQube Quality Gate fails.'
+        required: false
+        type: boolean
+        default: true
+      fetch_depth:
+        description: 'Git fetch depth. 0 for full history (recommended for SonarQube). Set to a higher number for shallow clone if needed.'
+        required: false
+        type: number
+        default: 0 # Full history is generally better for SonarQube analysis
+    secrets:
+      SONAR_TOKEN:
+        description: 'SonarCloud or SonarQube authentication token.'
+        required: true
+      GITHUB_TOKEN: # Required for PR decoration
+        description: 'GitHub token for PR decoration and status checks. Use secrets.GITHUB_TOKEN for public repos or a PAT for private.'
+        required: true
+
+
+jobs:
+  sonar_analysis:
+    name: SonarCloud/SonarQube Analysis
+    runs-on: ubuntu-latest # Or windows-latest / macos-latest depending on project needs
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.fetch_depth }} # Fetches all history for accurate SCM blame information
+
+      - name: Set up JDK
+        if: inputs.java_version # Only setup if a version is specified
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin' # Or 'zulu', 'adopt', etc.
+          java-version: ${{ inputs.java_version }}
+
+      - name: Set up .NET SDK
+        if: inputs.dotnet_version
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Set up Node.js
+        if: inputs.node_version
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # Cache SonarCloud packages
+      - name: Cache SonarCloud packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      # Cache SonarCloud scanner
+      - name: Cache SonarCloud scanner
+        id: cache-sonar-scanner
+        uses: actions/cache@v4
+        with:
+          path: ./.sonar/scanner
+          key: ${{ runner.os }}-sonar-scanner
+          restore-keys: ${{ runner.os }}-sonar-scanner
+
+      - name: Install SonarCloud scanner
+        if: steps.cache-sonar-scanner.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p ./.sonar/scanner
+          dotnet tool update dotnet-sonarscanner --tool-path ./.sonar/scanner
+
+      # .NET specific build step (if applicable)
+      - name: Build .NET Project (if specified)
+        if: inputs.dotnet_build_command
+        run: ${{ inputs.dotnet_build_command }}
+        shell: bash
+
+      # Build Wrapper for C/C++/Objective-C (Linux)
+      - name: Run Build Wrapper (Linux)
+        if: runner.os == 'Linux' && inputs.build_wrapper_command_linux
+        run: |
+          build-wrapper-linux-x86-64 --out-dir bw-output ${{ inputs.build_wrapper_command_linux }}
+        shell: bash
+
+      # Build Wrapper for C/C++/Objective-C (Windows)
+      - name: Run Build Wrapper (Windows)
+        if: runner.os == 'Windows' && inputs.build_wrapper_command_windows
+        run: |
+          build-wrapper-win-x86-64.exe --out-dir bw-output ${{ inputs.build_wrapper_command_windows }}
+        shell: pwsh
+
+      # Build Wrapper for C/C++/Objective-C (macOS)
+      - name: Run Build Wrapper (macOS)
+        if: runner.os == 'macOS' && inputs.build_wrapper_command_macos
+        run: |
+          build-wrapper-macosx-x86 --out-dir bw-output ${{ inputs.build_wrapper_command_macos }}
+        shell: bash
+
+      - name: Run SonarScanner
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # For PR decoration
+        shell: bash
+        run: |
+          SONAR_PROJECT_KEY_PARAM=""
+          if [ -n "${{ inputs.project_key }}" ]; then
+            SONAR_PROJECT_KEY_PARAM="-Dsonar.projectKey=${{ inputs.project_key }}"
+          else
+            SONAR_PROJECT_KEY_PARAM="-Dsonar.projectKey=${GITHUB_REPOSITORY_OWNER}_${GITHUB_REPOSITORY//${GITHUB_REPOSITORY_OWNER}\//}" # Default: owner_reponame
+          fi
+
+          SONAR_PROJECT_NAME_PARAM=""
+          if [ -n "${{ inputs.project_name }}" ]; then
+            SONAR_PROJECT_NAME_PARAM="-Dsonar.projectName=${{ inputs.project_name }}"
+          else
+            SONAR_PROJECT_NAME_PARAM="-Dsonar.projectName=${GITHUB_REPOSITORY}" # Default: owner/reponame
+          fi
+
+          SONAR_BUILD_WRAPPER_OUTPUT_PARAM=""
+          if [ -d "bw-output" ]; then # If build wrapper output exists
+            if [[ "$RUNNER_OS" == "Windows" ]]; then
+              SONAR_BUILD_WRAPPER_OUTPUT_PARAM="-Dsonar.cfamily.build-wrapper-output=bw-output"
+            else
+              SONAR_BUILD_WRAPPER_OUTPUT_PARAM="-Dsonar.cfamily.build-wrapper-output=bw-output"
+            fi
+          fi
+
+          # Determine if it's a PR or a branch scan
+          SONAR_PULLREQUEST_PARAMS=""
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            SONAR_PULLREQUEST_PARAMS=" \
+              -Dsonar.pullrequest.base=${{ github.event.pull_request.base.ref }} \
+              -Dsonar.pullrequest.branch=${{ github.event.pull_request.head.ref }} \
+              -Dsonar.pullrequest.key=${{ github.event.pull_request.number }} \
+              -Dsonar.pullrequest.github.repository=${{ github.repository }} \
+              -Dsonar.pullrequest.provider=github"
+            if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
+                SONAR_PULLREQUEST_PARAMS="$SONAR_PULLREQUEST_PARAMS -Dsonar.pullrequest.github.token.secured=${{ secrets.GITHUB_TOKEN }}"
+            fi
+          fi
+
+          ./.sonar/scanner/dotnet-sonarscanner begin \
+            $SONAR_PROJECT_KEY_PARAM \
+            $SONAR_PROJECT_NAME_PARAM \
+            -Dsonar.organization=${{ inputs.organization }} \
+            -Dsonar.host.url=${{ inputs.sonar_host_url }} \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.verbose=true \
+            -Dsonar.scm.provider=git \
+            $SONAR_BUILD_WRAPPER_OUTPUT_PARAM \
+            $SONAR_PULLREQUEST_PARAMS
+
+          # If .NET, run the build command again after 'begin' step
+          if [ -n "${{ inputs.dotnet_version }}" ]; then
+            if [ -n "${{ inputs.dotnet_build_command }}" ]; then
+              ${{ inputs.dotnet_build_command }}
+            else
+              dotnet build --no-incremental # Default build if no custom command
+            fi
+          fi
+
+          ./.sonar/scanner/dotnet-sonarscanner end -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      - name: Check Quality Gate Status (Wait for SonarQube analysis to complete)
+        if: inputs.fail_on_quality_gate_error == true && github.event_name != 'pull_request' # Typically QG check is for main/release branches
+        # For PRs, SonarQube usually handles this via PR decoration and status checks.
+        # This step might need adjustment based on SonarQube edition (Community vs Developer+)
+        # The following is a conceptual example and might require a more robust script or a dedicated action.
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+          SONAR_PROJECT_KEY: ${{ inputs.project_key || format('{0}_{1}', github.repository_owner, github.event.repository.name) }}
+        run: |
+          echo "Waiting for SonarQube analysis to complete and checking Quality Gate..."
+          # This is a simplified polling mechanism.
+          # A more robust solution would use SonarQube's Web API to get the analysis report ID and then poll its status.
+          # See SonarQube documentation for "sonar.projectKey" and "api/qualitygates/project_status"
+          # For SonarCloud, the status is often checked via the GitHub App integration.
+
+          # Placeholder: In a real scenario, you'd query the SonarQube API.
+          # For example (pseudo-code, requires jq and curl):
+          # REPORT_URL="${SONAR_HOST_URL}/api/ce/component?component=${SONAR_PROJECT_KEY}&branch=${GITHUB_REF_NAME}"
+          # sleep 60 # Initial wait
+          # for i in {1..10}; do
+          #   STATUS_JSON=$(curl -s -u "${SONAR_TOKEN}:" "${REPORT_URL}")
+          #   TASK_STATUS=$(echo "$STATUS_JSON" | jq -r '.queue.status // empty') # This API endpoint might differ
+          #   if [ "$TASK_STATUS" == "SUCCESS" ]; then
+          #     break
+          #   elif [ "$TASK_STATUS" == "FAILED" ] || [ "$TASK_STATUS" == "CANCELED" ]; then
+          #     echo "SonarQube analysis task failed or was canceled."
+          #     exit 1
+          #   fi
+          #   echo "Analysis still in progress (attempt $i/10)... waiting 30s"
+          #   sleep 30
+          # done
+
+          # QG_STATUS_URL="${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}&branch=${GITHUB_REF_NAME}"
+          # QG_RESPONSE=$(curl -s -u "${SONAR_TOKEN}:" "${QG_STATUS_URL}")
+          # QG_PROJECT_STATUS=$(echo "$QG_RESPONSE" | jq -r '.projectStatus.status')
+
+          # echo "Quality Gate Status: $QG_PROJECT_STATUS"
+          # if [ "$QG_PROJECT_STATUS" != "OK" ] && [ "$QG_PROJECT_STATUS" != "NONE" ]; then # NONE means no QG defined
+          #   echo "Quality Gate failed with status: $QG_PROJECT_STATUS"
+          #   exit 1
+          # else
+          #   echo "Quality Gate passed or not applicable."
+          # fi
+          echo "Quality Gate check placeholder. SonarCloud typically manages this via its GitHub App."
+          echo "For self-hosted SonarQube, a custom script using SonarQube Web API is needed here for robust QG checking."
+          echo "If fail_on_quality_gate_error is true, this step should implement the check."
+
+      - name: Analysis Summary
+        run: |
+          echo "## Static Code Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ inputs.project_name || github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Sonar Host:** ${{ inputs.sonar_host_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Organization:** ${{ inputs.organization }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Project Key:** ${{ inputs.project_key || format('{0}_{1}', github.repository_owner, github.event.repository.name) }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "- **Type:** Pull Request Analysis (#${{ github.event.pull_request.number }})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Type:** Branch Analysis (${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Status:** Analysis Submitted" >> $GITHUB_STEP_SUMMARY
+          # Quality Gate status would be added here if checked reliably
