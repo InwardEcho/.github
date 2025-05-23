@@ -1,0 +1,28 @@
+name: SampleApp CI
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  actions: write # Grant write permission for actions for CD
+  contents: read
+  packages: read
+
+jobs:
+  call_ci:
+    name: Call CI Workflow
+    uses: InwardEcho/workflow-templates/.github/workflows/ci-unified.yml@main
+    with:
+      logLevel: 'info' # Or your preferred log level
+      # enable_cd: true
+      # cd_workflow: '.github/workflows/sampleapp-cd.yml'
+      # solution_path: 'SampleApp.sln' # Optional: default = **/*.sln
+      # dotnet_version_to_use: '8.0.x' # Optional: default = 9.0.x
+    # secrets:
+    #   WORKFLOW_DISPATCH_PAT: ${{ secrets.WORKFLOW_DISPATCH_PAT }} # Required for triggering CD
+    #   NUGET_FEED_AUTH_TOKEN_CI: ${{ secrets.NUGET_FEED_AUTH_TOKEN_CI }} # Optional
+    #   SLACK_WEBHOOK_URL_CI: ${{ secrets.SLACK_WEBHOOK_URL_CI }} # Optional
