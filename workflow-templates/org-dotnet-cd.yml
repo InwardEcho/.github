@@ -1,0 +1,57 @@
+name: SampleApp CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_to_deploy:
+        description: 'Version to deploy (e.g., 1.2.3 or 1.2.3-feature-xyz.5)'
+        required: true
+        type: string
+      source_artifact_name:
+        description: 'Name of the build artifact to download (e.g., release-1.2.3-app-package)'
+        required: true
+        type: string
+      deployment_scope:
+        description: 'Defines the sequence of environments to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - dev-then-test
+          - dev-then-test-then-prod
+          - test-then-prod
+
+permissions:
+  contents: read
+  id-token: write # Required for OIDC with cloud providers
+
+# Concurrency control for this specific application's CD pipeline
+concurrency:
+  group: sampleapp-cd-${{ github.event.inputs.deployment_scope }}-${{ github.event.inputs.version_to_deploy }}
+  cancel-in-progress: false
+
+jobs:
+  call_sequential_cd:
+    name: Call Sequential CD Workflow for SampleApp
+    uses: InwardEcho/workflow-templates/.github/workflows/sequential-cd-workflow-composite.yml@main
+
+    with:
+      # Core inputs from workflow_dispatch
+      version_to_deploy: ${{ github.event.inputs.version_to_deploy }}
+      source_artifact_name: ${{ github.event.inputs.source_artifact_name }}
+      deployment_scope: ${{ github.event.inputs.deployment_scope }}
+      azure_app_name: 'sampleapp'
+
+      # Application-specific parameters
+      # db_migration_project_path: 'src/SampleApp.WebApp/SampleApp.WebApp.csproj'
+      terraform_directory: 'terraform'
+
+    secrets:
+      # Pass all necessary secrets
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      DB_CONNECTION_STRING: ${{ secrets.DB_CONNECTION_STRING }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS_APP_SERVICE }}

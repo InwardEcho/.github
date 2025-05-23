@@ -1,0 +1,7 @@
+{
+    "name": ".NET Continuous Deployment",
+    "description": "Deploys .NET applications across dev/test/prod environments. Supports EF Core migrations, version-specific deployments, Azure integration, and Terraform.",
+    "iconName": "dotnet",
+    "categories": ["C#", ".NET", "Deploy", "CD", "Azure", "Terraform"],
+    "filePatterns": ["*.sln", "*.csproj", "*.tf", "*.tfvars"]
+}
